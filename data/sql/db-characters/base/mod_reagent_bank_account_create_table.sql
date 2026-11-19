@@ -20,3 +20,9 @@ CREATE TABLE IF NOT EXISTS `mod_reagent_bank_share_invites` (
   `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`invitee_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `mod_reagent_bank_account_personal_exclusions` (
+  `guid` INT UNSIGNED NOT NULL,
+  `item_entry` INT UNSIGNED NOT NULL,
+  PRIMARY KEY (`guid`, `item_entry`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

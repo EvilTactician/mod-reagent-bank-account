@@ -8,12 +8,18 @@
  *   .rbank
  *   .rbank open
  *   .rbank list <categoryId> [page] [id|name|amount|amount_asc]
+ *   .rbank search <text>
+ *   .rbank exclude list
+ *   .rbank exclude add <itemEntry>
+ *   .rbank exclude remove <itemEntry>
  *   .rbank preview deposit all
  *   .rbank preview deposit category <categoryId>
+ *   .rbank preview deposit exclusions
  *   .rbank check recipe <requestId> <itemEntry> <amountPerCraft> [itemEntry amountPerCraft ...]
  *   .rbank check all <requestId>
  *   .rbank deposit all
  *   .rbank deposit category <categoryId>
+ *   .rbank deposit exclusions
  *   .rbank deposit item <itemEntry> <amount>
  *   .rbank deposit items <itemEntry> <amount> [itemEntry amount ...]
  *   .rbank withdraw all
@@ -29,9 +35,19 @@
  *   RBANK:TX:ITEM:<itemEntry>:<amount>
  *   RBANK:TX:END:<deposit|withdraw>:<total>:<itemCount>
  * Deposit preview is emitted as:
- *   RBANK:PREVIEW:BEGIN:<all|category>:<categoryId>:<total>:<itemCount>
+ *   RBANK:PREVIEW:BEGIN:<all|category|exclusions>:<categoryId>:<total>:<itemCount>
  *   RBANK:PREVIEW:ITEM:<itemEntry>:<amount>
- *   RBANK:PREVIEW:END:<all|category>:<categoryId>:<total>:<itemCount>
+ *   RBANK:PREVIEW:END:<all|category|exclusions>:<categoryId>:<total>:<itemCount>
+ * Search results (stored items whose name contains the text, at least 3 characters):
+ *   RBANK:SEARCH:BEGIN:<itemCount>:<searchText>
+ *   RBANK:SEARCH:ITEM:<itemEntry>:<amount>:<categoryId>
+ *   RBANK:SEARCH:END:<itemCount>
+ * The character's own deposit exclusions (kept in the bags by "deposit all", category
+ * deposits and auto-deposit; "deposit exclusions" banks just these):
+ *   RBANK:EXCL:BEGIN:<itemCount>
+ *   RBANK:EXCL:ITEM:<itemEntry>
+ *   RBANK:EXCL:END:<itemCount>
+ *   RBANK:EXCL:OK:<message> / RBANK:EXCL:ERR:<message>
  * Recipe bank-count checks are emitted as:
  *   RBANK:CHECK:BEGIN:<requestId>:<itemCount>
  *   RBANK:CHECK:ITEM:<itemEntry>:<storedAmount>
@@ -421,6 +437,13 @@ namespace ReagentBank
             ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
         CharacterDatabase.DirectExecute(
+            "CREATE TABLE IF NOT EXISTS `mod_reagent_bank_account_personal_exclusions` ("
+            "`guid` INT UNSIGNED NOT NULL,"
+            "`item_entry` INT UNSIGNED NOT NULL,"
+            "PRIMARY KEY (`guid`, `item_entry`)"
+            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+        CharacterDatabase.DirectExecute(
             "CREATE TABLE IF NOT EXISTS `mod_reagent_bank_share_members` ("
             "`member_key` INT UNSIGNED NOT NULL,"
             "`owner_key`  INT UNSIGNED NOT NULL,"
@@ -679,16 +702,97 @@ namespace ReagentBank
             professionCount, skinningCount, inclusionCount);
     }
 
-    // Banking an item an active quest asks for would undo the quest's progress, or leave
-    // a completed quest unable to turn in. This matters most for the periodic auto-deposit.
-    // Mages cast Slow Fall with a Light Feather, so "deposit all" and category
-    // deposits leave them in the bags. Explicit item deposits still take them.
-    static bool IsKeptForClassSpell(Player const* player, uint32 itemEntry)
+    static uint32 GetClassSpellFamily(uint8 playerClass)
     {
-        constexpr uint32 ITEM_LIGHT_FEATHER = 17056;
-        return itemEntry == ITEM_LIGHT_FEATHER && player->getClass() == CLASS_MAGE;
+        switch (playerClass)
+        {
+            case CLASS_WARRIOR:      return SPELLFAMILY_WARRIOR;
+            case CLASS_PALADIN:      return SPELLFAMILY_PALADIN;
+            case CLASS_HUNTER:       return SPELLFAMILY_HUNTER;
+            case CLASS_ROGUE:        return SPELLFAMILY_ROGUE;
+            case CLASS_PRIEST:       return SPELLFAMILY_PRIEST;
+            case CLASS_DEATH_KNIGHT: return SPELLFAMILY_DEATHKNIGHT;
+            case CLASS_SHAMAN:       return SPELLFAMILY_SHAMAN;
+            case CLASS_MAGE:         return SPELLFAMILY_MAGE;
+            case CLASS_WARLOCK:      return SPELLFAMILY_WARLOCK;
+            case CLASS_DRUID:        return SPELLFAMILY_DRUID;
+            default:                 return SPELLFAMILY_GENERIC;
+        }
     }
 
+    // A class spell: tagged with the class's spell family, or taught on one of the class's
+    // own skill lines (Arcane, Discipline, ...), whichever the spell data has.
+    static bool IsClassSpell(SpellInfo const* spellInfo, uint32 spellFamily)
+    {
+        if (spellInfo->SpellFamilyName == spellFamily)
+            return true;
+
+        SkillLineAbilityMapBounds const bounds = sSpellMgr->GetSkillLineAbilityMapBounds(spellInfo->Id);
+        for (auto itr = bounds.first; itr != bounds.second; ++itr)
+        {
+            SkillLineEntry const* skillLine = sSkillLineStore.LookupEntry(itr->second->SkillLine);
+            if (skillLine && skillLine->categoryId == SKILL_CATEGORY_CLASS)
+                return true;
+        }
+
+        return false;
+    }
+
+    // Reagents of the class spells this character has learned: a Light Feather for a mage's
+    // Slow Fall or a priest's Levitate. "deposit all", category deposits and auto-deposit leave
+    // them in the bags; other classes, and characters who haven't learned the spell yet (or
+    // have a glyph that removes the reagent), bank them as usual. Explicit item deposits still
+    // take them. Profession recipes are SPELLFAMILY_GENERIC, so crafting reagents never count.
+    static std::unordered_set<uint32> GetClassSpellReagents(Player const* player)
+    {
+        std::unordered_set<uint32> reagents;
+
+        uint32 const spellFamily = GetClassSpellFamily(player->getClass());
+        if (spellFamily == SPELLFAMILY_GENERIC)
+            return reagents;
+
+        for (auto const& spell : player->GetSpellMap())
+        {
+            uint32 const spellId = spell.first;
+            if (!player->HasActiveSpell(spellId))
+                continue;
+
+            SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+            if (!spellInfo || !IsClassSpell(spellInfo, spellFamily) || player->CanNoReagentCast(spellInfo))
+                continue;
+
+            for (int32 reagent : spellInfo->Reagent)
+                if (reagent > 0)
+                    reagents.insert(uint32(reagent));
+        }
+
+        return reagents;
+    }
+
+    // Each character's own list of items that "deposit all", category deposits and
+    // auto-deposit leave in the bags. Kept per character even when the bank is account-wide.
+    static std::unordered_set<uint32> LoadPersonalExclusions(Player const* player)
+    {
+        std::unordered_set<uint32> exclusions;
+
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT `item_entry` FROM `mod_reagent_bank_account_personal_exclusions` WHERE `guid` = {}",
+            player->GetGUID().GetCounter());
+
+        if (!result)
+            return exclusions;
+
+        do
+        {
+            if (uint32 itemEntry = (*result)[0].Get<uint32>())
+                exclusions.insert(itemEntry);
+        } while (result->NextRow());
+
+        return exclusions;
+    }
+
+    // Banking an item an active quest asks for would undo the quest's progress, or leave
+    // a completed quest unable to turn in. This matters most for the periodic auto-deposit.
     static bool IsNeededByActiveQuest(Player const* player, uint32 itemEntry)
     {
         for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
@@ -1314,7 +1418,44 @@ namespace ReagentBank
         SendProtocol(handler, "RBANK:END:CATEGORY");
     }
 
-    static uint32 DepositFromSlot(Player* player, uint8 bagSlot, uint8 itemSlot, uint32 onlyCategory, std::map<uint32, StoredItem>& storedItems, ItemAmountMap& deposited, bool& overflowed)
+    // What a bag sweep ("deposit all", "deposit category", "deposit exclusions" and their
+    // previews) may take. ExclusionsOnly takes just the character's own exclusions, and
+    // only those the bank would accept anyway.
+    struct DepositRules
+    {
+        uint32 OnlyCategory = 0;
+        bool ExclusionsOnly = false;
+        std::unordered_set<uint32> PersonalExclusions;
+        std::unordered_set<uint32> ClassSpellReagents;
+    };
+
+    static DepositRules MakeDepositRules(Player const* player, uint32 onlyCategory, bool exclusionsOnly)
+    {
+        DepositRules rules;
+        rules.OnlyCategory = onlyCategory;
+        rules.ExclusionsOnly = exclusionsOnly;
+        rules.PersonalExclusions = LoadPersonalExclusions(player);
+        if (!exclusionsOnly)
+            rules.ClassSpellReagents = GetClassSpellReagents(player);
+        return rules;
+    }
+
+    static bool IsSkippedByDepositRules(Player const* player, uint32 itemEntry, uint32 itemSubclass, DepositRules const& rules)
+    {
+        if (IsDepositExcluded(itemEntry) || IsNeededByActiveQuest(player, itemEntry))
+            return true;
+
+        if (rules.OnlyCategory && itemSubclass != rules.OnlyCategory)
+            return true;
+
+        bool const personallyExcluded = rules.PersonalExclusions.contains(itemEntry);
+        if (rules.ExclusionsOnly)
+            return !personallyExcluded;
+
+        return personallyExcluded || rules.ClassSpellReagents.contains(itemEntry);
+    }
+
+    static uint32 DepositFromSlot(Player* player, uint8 bagSlot, uint8 itemSlot, DepositRules const& rules, std::map<uint32, StoredItem>& storedItems, ItemAmountMap& deposited, bool& overflowed)
     {
         // A stack offered in a trade window still goes to the trade partner.
         Item* item = player->GetItemByPos(bagSlot, itemSlot);
@@ -1326,10 +1467,7 @@ namespace ReagentBank
         if (!IsStorableReagent(item->GetTemplate(), itemEntry, itemSubclass))
             return 0;
 
-        if (IsDepositExcluded(itemEntry) || IsNeededByActiveQuest(player, itemEntry) || IsKeptForClassSpell(player, itemEntry))
-            return 0;
-
-        if (onlyCategory && itemSubclass != onlyCategory)
+        if (IsSkippedByDepositRules(player, itemEntry, itemSubclass, rules))
             return 0;
 
         uint32 const count = item->GetCount();
@@ -1355,13 +1493,15 @@ namespace ReagentBank
         return count;
     }
 
-    static uint32 Deposit(Player* player, uint32 onlyCategory, ItemAmountMap& deposited, bool& overflowed)
+    static uint32 Deposit(Player* player, uint32 onlyCategory, ItemAmountMap& deposited, bool& overflowed, bool exclusionsOnly = false)
     {
         deposited.clear();
         overflowed = false;
 
         if (!player)
             return 0;
+
+        DepositRules const rules = MakeDepositRules(player, onlyCategory, exclusionsOnly);
 
         std::map<uint32, StoredItem> storedItems;
         LoadStoredItems(player, storedItems);
@@ -1371,7 +1511,7 @@ namespace ReagentBank
 
         for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
         {
-            uint32 const depositedFromSlot = DepositFromSlot(player, INVENTORY_SLOT_BAG_0, slot, onlyCategory, storedItems, deposited, overflowed);
+            uint32 const depositedFromSlot = DepositFromSlot(player, INVENTORY_SLOT_BAG_0, slot, rules, storedItems, deposited, overflowed);
             uint32 updatedTotal = 0;
             if (AddAmountChecked(totalDeposited, depositedFromSlot, updatedTotal))
                 totalDeposited = updatedTotal;
@@ -1390,7 +1530,7 @@ namespace ReagentBank
 
             for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
             {
-                uint32 const depositedFromSlot = DepositFromSlot(player, bagSlot, uint8(slot), onlyCategory, storedItems, deposited, overflowed);
+                uint32 const depositedFromSlot = DepositFromSlot(player, bagSlot, uint8(slot), rules, storedItems, deposited, overflowed);
                 uint32 updatedTotal = 0;
                 if (AddAmountChecked(totalDeposited, depositedFromSlot, updatedTotal))
                     totalDeposited = updatedTotal;
@@ -1418,7 +1558,7 @@ namespace ReagentBank
     }
 
 
-    static uint32 PreviewDepositFromSlot(Player* player, uint8 bagSlot, uint8 itemSlot, uint32 onlyCategory, std::map<uint32, StoredItem>& simulatedStoredItems, ItemAmountMap& previewItems, bool& overflowed)
+    static uint32 PreviewDepositFromSlot(Player* player, uint8 bagSlot, uint8 itemSlot, DepositRules const& rules, std::map<uint32, StoredItem>& simulatedStoredItems, ItemAmountMap& previewItems, bool& overflowed)
     {
         // A stack offered in a trade window still goes to the trade partner.
         Item* item = player->GetItemByPos(bagSlot, itemSlot);
@@ -1430,10 +1570,7 @@ namespace ReagentBank
         if (!IsStorableReagent(item->GetTemplate(), itemEntry, itemSubclass))
             return 0;
 
-        if (IsDepositExcluded(itemEntry) || IsNeededByActiveQuest(player, itemEntry) || IsKeptForClassSpell(player, itemEntry))
-            return 0;
-
-        if (onlyCategory && itemSubclass != onlyCategory)
+        if (IsSkippedByDepositRules(player, itemEntry, itemSubclass, rules))
             return 0;
 
         uint32 const count = item->GetCount();
@@ -1455,13 +1592,15 @@ namespace ReagentBank
         return count;
     }
 
-    static uint32 CollectDepositPreview(Player* player, uint32 onlyCategory, ItemAmountMap& previewItems, bool& overflowed)
+    static uint32 CollectDepositPreview(Player* player, uint32 onlyCategory, ItemAmountMap& previewItems, bool& overflowed, bool exclusionsOnly = false)
     {
         previewItems.clear();
         overflowed = false;
 
         if (!player)
             return 0;
+
+        DepositRules const rules = MakeDepositRules(player, onlyCategory, exclusionsOnly);
 
         std::map<uint32, StoredItem> simulatedStoredItems;
         LoadStoredItems(player, simulatedStoredItems);
@@ -1470,7 +1609,7 @@ namespace ReagentBank
 
         for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
         {
-            uint32 const previewedFromSlot = PreviewDepositFromSlot(player, INVENTORY_SLOT_BAG_0, slot, onlyCategory, simulatedStoredItems, previewItems, overflowed);
+            uint32 const previewedFromSlot = PreviewDepositFromSlot(player, INVENTORY_SLOT_BAG_0, slot, rules, simulatedStoredItems, previewItems, overflowed);
             uint32 updatedTotal = 0;
             if (AddAmountChecked(totalPreviewed, previewedFromSlot, updatedTotal))
                 totalPreviewed = updatedTotal;
@@ -1489,7 +1628,7 @@ namespace ReagentBank
 
             for (uint32 slot = 0; slot < bag->GetBagSize(); ++slot)
             {
-                uint32 const previewedFromSlot = PreviewDepositFromSlot(player, bagSlot, uint8(slot), onlyCategory, simulatedStoredItems, previewItems, overflowed);
+                uint32 const previewedFromSlot = PreviewDepositFromSlot(player, bagSlot, uint8(slot), rules, simulatedStoredItems, previewItems, overflowed);
                 uint32 updatedTotal = 0;
                 if (AddAmountChecked(totalPreviewed, previewedFromSlot, updatedTotal))
                     totalPreviewed = updatedTotal;
@@ -2341,9 +2480,146 @@ namespace ReagentBank
         LOG_INFO("module", "ReagentBankAccount: key {} was removed from key {}'s shared bank.", memberKey, ownerKey);
     }
 
+    static constexpr std::size_t MAX_PERSONAL_EXCLUSIONS = 200;
+    static constexpr std::size_t MIN_SEARCH_LENGTH = 3;
+    static constexpr std::size_t MAX_SEARCH_RESULTS = 100;
+
+    // Exclusion replies use their own lines, so the addon can answer from its settings
+    // page without opening the bank window the way RBANK:OK/ERR do.
+    static void SendExclusionOk(ChatHandler* handler, std::string const& message)
+    {
+        SendProtocol(handler, Acore::StringFormat("RBANK:EXCL:OK:{}", SanitizeProtocolText(message)));
+    }
+
+    static void SendExclusionError(ChatHandler* handler, std::string const& message)
+    {
+        SendProtocol(handler, Acore::StringFormat("RBANK:EXCL:ERR:{}", SanitizeProtocolText(message)));
+    }
+
+    static void SendPersonalExclusions(ChatHandler* handler, Player const* player)
+    {
+        std::unordered_set<uint32> const exclusions = LoadPersonalExclusions(player);
+        std::vector<uint32> sorted(exclusions.begin(), exclusions.end());
+        std::sort(sorted.begin(), sorted.end());
+
+        SendProtocol(handler, Acore::StringFormat("RBANK:EXCL:BEGIN:{}", uint32(sorted.size())));
+
+        for (uint32 itemEntry : sorted)
+            SendProtocol(handler, Acore::StringFormat("RBANK:EXCL:ITEM:{}", itemEntry));
+
+        SendProtocol(handler, Acore::StringFormat("RBANK:EXCL:END:{}", uint32(sorted.size())));
+    }
+
+    static void HandleExclusionAdd(ChatHandler* handler, Player const* player, uint32 itemEntry)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemEntry);
+        if (!proto)
+        {
+            SendExclusionError(handler, "That item doesn't exist.");
+            return;
+        }
+
+        // Only items a deposit could take: the list never lets anything else into the bank.
+        uint32 storableEntry = 0;
+        uint32 itemSubclass = 0;
+        if (!IsStorableReagent(proto, storableEntry, itemSubclass) || IsDepositExcluded(itemEntry))
+        {
+            SendExclusionError(handler, Acore::StringFormat("{} never goes into the reagent bank, so there is nothing to exclude.", proto->Name1));
+            return;
+        }
+
+        std::unordered_set<uint32> const exclusions = LoadPersonalExclusions(player);
+        if (exclusions.contains(itemEntry))
+        {
+            SendExclusionOk(handler, Acore::StringFormat("{} is already on your exclusion list.", proto->Name1));
+            SendPersonalExclusions(handler, player);
+            return;
+        }
+
+        if (exclusions.size() >= MAX_PERSONAL_EXCLUSIONS)
+        {
+            SendExclusionError(handler, Acore::StringFormat("Your exclusion list is full ({} items).", uint32(MAX_PERSONAL_EXCLUSIONS)));
+            return;
+        }
+
+        CharacterDatabase.DirectExecute(
+            "INSERT IGNORE INTO `mod_reagent_bank_account_personal_exclusions` (`guid`, `item_entry`) VALUES ({}, {})",
+            player->GetGUID().GetCounter(), itemEntry);
+
+        SendExclusionOk(handler, Acore::StringFormat("{} will stay in your bags.", proto->Name1));
+        SendPersonalExclusions(handler, player);
+    }
+
+    static void HandleExclusionRemove(ChatHandler* handler, Player const* player, uint32 itemEntry)
+    {
+        CharacterDatabase.DirectExecute(
+            "DELETE FROM `mod_reagent_bank_account_personal_exclusions` WHERE `guid` = {} AND `item_entry` = {}",
+            player->GetGUID().GetCounter(), itemEntry);
+
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemEntry);
+        SendExclusionOk(handler, Acore::StringFormat("{} removed from your exclusion list.", proto ? proto->Name1 : std::to_string(itemEntry)));
+        SendPersonalExclusions(handler, player);
+    }
+
+    // Stored items whose name contains the query, case-insensitively, in the player's
+    // client language, from every category. The addon only holds the category it shows.
+    static void SendSearch(ChatHandler* handler, Player const* player, std::string const& query)
+    {
+        std::string const needle = ToLower(query);
+
+        struct SearchMatch
+        {
+            std::string SortName;
+            StoredItem Item;
+        };
+
+        std::vector<SearchMatch> matches;
+
+        std::map<uint32, StoredItem> storedItems;
+        LoadStoredItems(player, storedItems);
+
+        LocaleConstant const locale = LocaleConstant(player->GetSession()->GetSessionDbLocaleIndex());
+
+        for (std::pair<uint32 const, StoredItem> const& pair : storedItems)
+        {
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(pair.first);
+            if (!proto)
+                continue;
+
+            std::string name = proto->Name1;
+            if (locale != LOCALE_enUS)
+                if (ItemLocale const* itemLocale = sObjectMgr->GetItemLocale(pair.first))
+                    ObjectMgr::GetLocaleString(itemLocale->Name, locale, name);
+
+            std::string lowerName = ToLower(name);
+            if (lowerName.find(needle) == std::string::npos)
+                continue;
+
+            matches.push_back({ std::move(lowerName), pair.second });
+        }
+
+        std::sort(matches.begin(), matches.end(), [](SearchMatch const& left, SearchMatch const& right)
+            {
+                if (left.SortName != right.SortName)
+                    return left.SortName < right.SortName;
+
+                return left.Item.ItemEntry < right.Item.ItemEntry;
+            });
+
+        if (matches.size() > MAX_SEARCH_RESULTS)
+            matches.resize(MAX_SEARCH_RESULTS);
+
+        SendProtocol(handler, Acore::StringFormat("RBANK:SEARCH:BEGIN:{}:{}", uint32(matches.size()), SanitizeProtocolText(query)));
+
+        for (SearchMatch const& match : matches)
+            SendProtocol(handler, Acore::StringFormat("RBANK:SEARCH:ITEM:{}:{}:{}", match.Item.ItemEntry, match.Item.Amount, match.Item.ItemSubclass));
+
+        SendProtocol(handler, Acore::StringFormat("RBANK:SEARCH:END:{}", uint32(matches.size())));
+    }
+
     static void SendUsage(ChatHandler* handler)
     {
-        SendError(handler, "Usage: .rbank open | list <categoryId> [page] [id|name|amount|amount_asc] | preview deposit all|category <categoryId> | check recipe <requestId> <itemEntry> <amountPerCraft> [...] | check all <requestId> | deposit all|category <categoryId>|item <itemEntry> <amount>|items <itemEntry> <amount> [...] | withdraw all|category <categoryId>|item <itemEntry> <one|stack|all|exact <amount>>|needed <itemEntry> <amount> [...] | share [open|invite <name>|accept|decline|leave|kick <name>]");
+        SendError(handler, "Usage: .rbank open | list <categoryId> [page] [id|name|amount|amount_asc] | search <text> | exclude list|add <itemEntry>|remove <itemEntry> | preview deposit all|category <categoryId>|exclusions | check recipe <requestId> <itemEntry> <amountPerCraft> [...] | check all <requestId> | deposit all|category <categoryId>|exclusions|item <itemEntry> <amount>|items <itemEntry> <amount> [...] | withdraw all|category <categoryId>|item <itemEntry> <one|stack|all|exact <amount>>|needed <itemEntry> <amount> [...] | share [open|invite <name>|accept|decline|leave|kick <name>]");
     }
 }
 
@@ -2419,6 +2695,48 @@ private:
             return true;
         }
 
+        if (command == "search")
+        {
+            std::string query;
+            for (std::size_t index = 1; index < tokens.size(); ++index)
+                query += (index > 1 ? " " : "") + tokens[index];
+
+            if (query.size() < ReagentBank::MIN_SEARCH_LENGTH)
+            {
+                ReagentBank::SendError(handler, Acore::StringFormat("Search for at least {} characters.", uint32(ReagentBank::MIN_SEARCH_LENGTH)));
+                return true;
+            }
+
+            ReagentBank::SendSearch(handler, player, query);
+            return true;
+        }
+
+        if (command == "exclude")
+        {
+            std::string const action = tokens.size() >= 2 ? ReagentBank::ToLower(tokens[1]) : "list";
+
+            if (action == "list")
+            {
+                ReagentBank::SendPersonalExclusions(handler, player);
+                return true;
+            }
+
+            uint32 itemEntry = 0;
+            if ((action != "add" && action != "remove") || tokens.size() < 3 ||
+                !ReagentBank::TryParseUInt32(tokens[2], itemEntry) || !itemEntry)
+            {
+                ReagentBank::SendExclusionError(handler, "Usage: .rbank exclude list|add <itemEntry>|remove <itemEntry>");
+                return true;
+            }
+
+            if (action == "add")
+                ReagentBank::HandleExclusionAdd(handler, player, itemEntry);
+            else
+                ReagentBank::HandleExclusionRemove(handler, player, itemEntry);
+
+            return true;
+        }
+
 
 #if __has_include("ChallengesApi.h")
         // mod-challenges: a Self-Found character keeps its reagents to itself. It can't take the
@@ -2436,7 +2754,7 @@ private:
         {
             if (tokens.size() < 3 || ReagentBank::ToLower(tokens[1]) != "deposit")
             {
-                ReagentBank::SendError(handler, "Usage: .rbank preview deposit all|category <categoryId>");
+                ReagentBank::SendError(handler, "Usage: .rbank preview deposit all|category <categoryId>|exclusions");
                 return true;
             }
 
@@ -2449,6 +2767,20 @@ private:
                 uint32 total = ReagentBank::CollectDepositPreview(player, 0, previewItems, overflowed);
 
                 ReagentBank::SendDepositPreview(handler, "all", 0, previewItems);
+
+                if (!total && overflowed)
+                    ReagentBank::SendError(handler, "No reagents can be deposited because the reagent bank cap was reached for the matching item(s).");
+
+                return true;
+            }
+
+            if (scope == "exclusions")
+            {
+                ReagentBank::ItemAmountMap previewItems;
+                bool overflowed = false;
+                uint32 total = ReagentBank::CollectDepositPreview(player, 0, previewItems, overflowed, true);
+
+                ReagentBank::SendDepositPreview(handler, "exclusions", 0, previewItems);
 
                 if (!total && overflowed)
                     ReagentBank::SendError(handler, "No reagents can be deposited because the reagent bank cap was reached for the matching item(s).");
@@ -2484,7 +2816,7 @@ private:
                 return true;
             }
 
-            ReagentBank::SendError(handler, "Usage: .rbank preview deposit all|category <categoryId>");
+            ReagentBank::SendError(handler, "Usage: .rbank preview deposit all|category <categoryId>|exclusions");
             return true;
         }
 
@@ -2560,6 +2892,27 @@ private:
                     ReagentBank::SendError(handler, "No reagents were deposited because the reagent bank cap was reached for the matching item(s).");
                 else
                     ReagentBank::SendOk(handler, "No matching reagents were found in your bags.");
+
+                ReagentBank::SendRoot(handler, player);
+                return true;
+            }
+
+            if (scope == "exclusions")
+            {
+                ReagentBank::ItemAmountMap deposited;
+                bool overflowed = false;
+                uint32 total = ReagentBank::Deposit(player, 0, deposited, overflowed, true);
+
+                ReagentBank::SendTransaction(handler, "deposit", deposited);
+
+                if (total)
+                    ReagentBank::SendOk(handler, overflowed
+                        ? Acore::StringFormat("Deposited {} excluded reagent(s). Some stacks were skipped because the bank cap was reached.", total)
+                        : Acore::StringFormat("Deposited {} excluded reagent(s).", total));
+                else if (overflowed)
+                    ReagentBank::SendError(handler, "No reagents were deposited because the reagent bank cap was reached for the matching item(s).");
+                else
+                    ReagentBank::SendOk(handler, "None of your excluded reagents are in your bags.");
 
                 ReagentBank::SendRoot(handler, player);
                 return true;
