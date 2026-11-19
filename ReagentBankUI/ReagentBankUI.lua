@@ -151,6 +151,23 @@ local CATEGORY_BUTTON_HEIGHT = 24
 local CATEGORY_BUTTON_GAP = 8
 local CATEGORY_PAGE_TEXT_GAP = 10
 local CATEGORY_PAGE_TEXT_WIDTH = 104
+local DEPOSIT_EXCLUSIONS_BUTTON_WIDTH = 148
+-- The Back button's art: DragonUI's red three-slice sheet (MIT, NeticSoul) recoloured
+-- blue, so it stands out from the red buttons.
+local BACK_BUTTON_TEXTURE = "Interface\\AddOns\\ReagentBankUI\\Textures\\BackButton"
+local BACK_BUTTON_CAP_WIDTH = 114
+local BACK_BUTTON_ART_HEIGHT = 128
+local BACK_BUTTON_STATES = {
+    NORMAL = { cap = { 4/256, 61/256, 76/256, 140/256 }, mid = { 4/256, 36/256, 148/256, 212/256 } },
+    PUSHED = { cap = { 136/256, 193/256, 76/256, 140/256 }, mid = { 84/256, 116/256, 148/256, 212/256 } },
+}
+local SEARCH_BOX_WIDTH = 210
+-- How far the search box sits below the mode text's line.
+local SEARCH_BOX_DROP = 7
+local SEARCH_MIN_LENGTH = 3
+local SEARCH_DELAY = 0.45
+local EXCLUSION_ROW_COUNT = 8
+local EXCLUSION_ROW_HEIGHT = 22
 local SHOPPING_RECIPE_BUTTON_WIDTH = 132
 local SHOPPING_PRINT_BUTTON_WIDTH = 96
 local SHOPPING_CLEAR_BUTTON_WIDTH = 96
@@ -822,6 +839,11 @@ function RB:ScheduleRefresh(delay, view, categoryId, page)
 end
 
 function RB:ScheduleCurrentRefresh(delay)
+    if (self.currentView == "search" or self:IsSearchDetail()) and self.searchQuery then
+        self:ScheduleRefresh(delay, "search")
+        return
+    end
+
     if self.currentView == "category" or self.currentView == "detail" then
         if self.currentCategoryId then
             self:ScheduleRefresh(delay, "category", self.currentCategoryId, self.currentPage or 0)
@@ -892,6 +914,11 @@ function RB:RefreshItemInfoIfNeeded()
         return
     end
 
+    if self.currentView == "search" then
+        self:RenderSearch(true)
+        return
+    end
+
     self:ClearItemInfoRefresh()
 end
 
@@ -916,11 +943,17 @@ function RB:OnUpdate(elapsed)
 
         if refresh.view == "category" and refresh.categoryId then
             self:RequestCategory(refresh.categoryId, refresh.page or 0)
+        elseif refresh.view == "search" and self.searchQuery then
+            self:RequestSearch(self.searchQuery)
         else
             self:RequestRoot()
         end
 
         return
+    end
+
+    if self.pendingSearchAt and now >= self.pendingSearchAt then
+        self:SearchNow()
     end
 
     if self.nextItemInfoRefreshAt and now >= self.nextItemInfoRefreshAt then
@@ -931,7 +964,7 @@ function RB:OnUpdate(elapsed)
         self:ClearBusy("No server data yet. Press Refresh to try again.", 1.00, 0.82, 0.32)
     end
 
-    if not self.pendingRefresh and not self.busyStartedAt and not self.pendingAutoDepositAt and not self.nextItemInfoRefreshAt and not self.nextAutoDepositTickerAt and not self.pendingTradeSkillBagRefreshAt then
+    if not self.pendingRefresh and not self.busyStartedAt and not self.pendingAutoDepositAt and not self.nextItemInfoRefreshAt and not self.nextAutoDepositTickerAt and not self.pendingTradeSkillBagRefreshAt and not self.pendingSearchAt then
         self:SetScript("OnUpdate", nil)
     end
 end
@@ -1432,10 +1465,10 @@ function RB:UpdatePreviewToggleButton()
 
     if self:IsDepositPreviewEnabled() then
         self.frame.previewToggle:SetText("Preview: On")
-        self.frame.previewToggle.tooltipText = "Deposit All and Deposit Category will show a confirmation preview first."
+        self.frame.previewToggle.tooltipText = "Deposit All, Deposit Category and Deposit Exclusions will show a confirmation preview first."
     else
         self.frame.previewToggle:SetText("Preview: Off")
-        self.frame.previewToggle.tooltipText = "Deposit All and Deposit Category will deposit immediately."
+        self.frame.previewToggle.tooltipText = "Deposit All, Deposit Category and Deposit Exclusions will deposit immediately."
     end
 end
 
@@ -1447,6 +1480,9 @@ function RB:UpdateSortButton()
     if self.currentView == "shopping" then
         self.frame.sortMode:SetText("Sort: Name")
         self.frame.sortMode.tooltipText = "AH shopping list items are sorted by item name."
+    elseif self.currentView == "search" then
+        self.frame.sortMode:SetText("Sort: Name")
+        self.frame.sortMode.tooltipText = "Search results are sorted by item name."
     elseif self.currentView == "root" then
         self.frame.sortMode:SetText(CategorySortLabel(self:GetCategorySortMode()))
         self.frame.sortMode.tooltipText = "Cycle category sorting: default order, total amount, type count, or name."
@@ -2965,6 +3001,344 @@ function RB:RequestCategory(categoryId, page)
     self:SendServerCommand("list " .. tostring(categoryId) .. " " .. tostring(page) .. " " .. self:GetItemSortMode())
 end
 
+-- An item opened from the search results rather than from a category.
+function RB:IsSearchDetail()
+    return self.currentView == "detail" and self.detailOrigin == "search"
+end
+
+function RB:RefreshCurrentView()
+    if (self.currentView == "search" or self:IsSearchDetail()) and self.searchQuery then
+        self:RequestSearch(self.searchQuery)
+    elseif (self.currentView == "category" or self.currentView == "detail") and self.currentCategoryId then
+        self:RequestCategory(self.currentCategoryId, self.currentPage or 0)
+    else
+        self:RequestRoot()
+    end
+end
+
+-- The blue Back: an item goes back to the search results or the category it
+-- was opened from; a category goes back to the home screen.
+function RB:GoBack()
+    self:HideWithdrawPrompt()
+
+    if self.currentView == "detail" then
+        if self.detailOrigin == "search" and self.searchQuery then
+            self:RenderSearch()
+            return
+        end
+
+        if self.currentCategoryId then
+            self:RenderCategory()
+            return
+        end
+    end
+
+    self:ClearSearch()
+    self:RequestRoot()
+end
+
+function RB:UpdateSearchHint()
+    local box = self.frame and self.frame.searchBox
+    if not box then
+        return
+    end
+
+    if box:GetText() == "" and not box:HasFocus() then
+        self.frame.searchHint:Show()
+    else
+        self.frame.searchHint:Hide()
+    end
+end
+
+-- Chat links and control characters would break the chat command the search is
+-- sent as. Spaces are collapsed the way the server reads them, so its echo of the
+-- search text matches.
+function RB:GetSearchBoxText()
+    local box = self.frame and self.frame.searchBox
+    if not box then
+        return ""
+    end
+
+    local text = string.gsub(box:GetText() or "", "[|%c]", "")
+    text = string.gsub(text, "%s+", " ")
+    return Trim(text)
+end
+
+function RB:ClearSearch()
+    self.pendingSearchAt = nil
+    self.searchQuery = nil
+    self.searchResults = nil
+
+    local box = self.frame and self.frame.searchBox
+    if box then
+        self.settingSearchText = true
+        box:SetText("")
+        self.settingSearchText = nil
+        box:ClearFocus()
+        self:UpdateSearchHint()
+    end
+end
+
+-- Typing searches after a short pause; fewer than SEARCH_MIN_LENGTH characters
+-- goes back to the category list.
+function RB:OnSearchTextChanged()
+    local text = self:GetSearchBoxText()
+
+    if string.len(text) >= SEARCH_MIN_LENGTH then
+        self.pendingSearchAt = GetTime() + SEARCH_DELAY
+        self:EnsureOnUpdate()
+        return
+    end
+
+    self.pendingSearchAt = nil
+
+    if self.searchQuery then
+        self.searchQuery = nil
+        self.searchResults = nil
+
+        if self.currentView == "search" then
+            self:RenderRoot()
+        end
+    end
+end
+
+function RB:SearchNow()
+    self.pendingSearchAt = nil
+
+    local text = self:GetSearchBoxText()
+    if string.len(text) < SEARCH_MIN_LENGTH then
+        if text ~= "" then
+            self:Status("Type at least " .. tostring(SEARCH_MIN_LENGTH) .. " characters to search.", 1.00, 0.82, 0.32)
+        end
+        return
+    end
+
+    self.searchQuery = text
+    self:RequestSearch(text)
+end
+
+function RB:RequestSearch(query)
+    query = Trim(query)
+    if string.len(query) < SEARCH_MIN_LENGTH then
+        return
+    end
+
+    self:HideDepositPreview()
+    self:HideShoppingAmountPrompt()
+    self.pendingRefresh = nil
+    self.awaitingView = "search"
+
+    self:BeginBusy("request", "Searching...")
+    self:SendServerCommand("search " .. query)
+end
+
+function RB:ShowSearchResultDetail(item)
+    self.detailOrigin = "search"
+    self.currentCategoryId = nil
+    self.currentPage = 0
+    self:ShowDetail(item)
+end
+
+function RB:RenderSearch(preserveStatus)
+    self:HideWithdrawPrompt()
+    self:HideShoppingAmountPrompt()
+    self:CreateFrame()
+
+    self.currentView = "search"
+    self.currentCategoryId = nil
+    self.currentPage = 0
+    self.totalPages = 1
+    self.detailItem = nil
+    self.detailOrigin = nil
+
+    local f = self.frame
+    local query = self.searchQuery or ""
+    local entries = {}
+    local maxAmount = 0
+
+    for _, item in ipairs(self.searchResults or {}) do
+        local amount = tonumber(item.amount) or 0
+        if amount > 0 then
+            table.insert(entries, item)
+            if amount > maxAmount then
+                maxAmount = amount
+            end
+        end
+    end
+
+    f:Show()
+    f.title:SetText("Reagent Bank")
+    f.modeText:SetText(tostring(#entries) .. " result(s) for \"" .. query .. "\"" ..
+        (#entries >= 100 and ColorText("  (first 100 shown)") or ""))
+    f.pageText:SetText("")
+    f.headerName:ClearAllPoints()
+    f.headerName:SetPoint("LEFT", 32, 0)
+    f.headerName:SetText("Item")
+    f.headerCount:SetText("Stored")
+
+    self:SetCommonVisibility("search")
+    self:ClearRows()
+
+    local missingItemInfo = false
+    for _, item in ipairs(entries) do
+        local _, _, _, _, missingInfo = GetItemDisplay(item.entry)
+        if missingInfo then
+            missingItemInfo = true
+        end
+    end
+
+    self:SetListEntries(entries, function(row, item)
+        local icon, name, link = GetItemDisplay(item.entry)
+        local category = CATEGORY_BY_ID[tonumber(item.categoryId)]
+
+        row.kind = "search"
+        row.item = item
+        row.icon:Show()
+        row.icon:SetTexture(icon)
+        row.text:ClearAllPoints()
+        row.text:SetPoint("LEFT", row.icon, "RIGHT", 9, 0)
+        row.text:SetPoint("RIGHT", -170, 0)
+        row.text:SetText((link or name) .. (category and ("  " .. ColorText(category.name)) or ""))
+        row.count:SetText("x" .. FormatCount(item.amount))
+        RB:SetRowFill(row, item.amount, maxAmount)
+    end, "search:" .. query)
+
+    if #entries == 0 then
+        self:SetEmptyRow("No stored reagents match \"" .. query .. "\".")
+        missingItemInfo = false
+    end
+
+    if missingItemInfo then
+        self:QueueItemInfoRefresh()
+    else
+        self:ClearItemInfoRefresh()
+    end
+
+    self:UpdateControls()
+
+    if not preserveStatus and not self.busyKind then
+        self:Status("Click an item to withdraw it. Clear the search box to see the categories again.", 0.82, 0.82, 0.82)
+    end
+end
+
+function RB:DepositExclusions()
+    if self:IsDepositPreviewEnabled() then
+        self:RequestDepositPreview("exclusions")
+    else
+        self:RunDeposit("exclusions")
+    end
+end
+
+-- The character's own deposit exclusions, edited in the settings panel and kept on the server.
+function RB:RequestExclusions()
+    self:SendServerCommand("exclude list")
+end
+
+function RB:AddExclusion(itemEntry)
+    itemEntry = tonumber(itemEntry)
+    if not itemEntry or itemEntry <= 0 then
+        self:ExclusionStatus("Drop an item here, Shift-click an item link, or type an item ID.", 1.00, 0.82, 0.32)
+        return
+    end
+
+    self:ExclusionStatus("Adding...", 0.82, 0.82, 0.82)
+    self:SendServerCommand("exclude add " .. tostring(math.floor(itemEntry)))
+end
+
+function RB:AddExclusionFromBox()
+    local panel = self.settingsPanel
+    if not panel then
+        return
+    end
+
+    local text = Trim(panel.exclusionBox:GetText())
+    local itemEntry = tonumber(text) or ParseItemIdFromLink(text)
+    panel.exclusionBox:SetText("")
+    panel.exclusionBox:ClearFocus()
+    self:AddExclusion(itemEntry)
+end
+
+function RB:AddCursorItemToExclusions()
+    if not GetCursorInfo then
+        return
+    end
+
+    local kind, itemId = GetCursorInfo()
+    if kind == "item" and itemId then
+        ClearCursor()
+        self:AddExclusion(itemId)
+    end
+end
+
+function RB:RemoveExclusion(itemEntry)
+    itemEntry = tonumber(itemEntry)
+    if not itemEntry then
+        return
+    end
+
+    self:ExclusionStatus("Removing...", 0.82, 0.82, 0.82)
+    self:SendServerCommand("exclude remove " .. tostring(math.floor(itemEntry)))
+end
+
+-- Exclusion replies go to the settings panel when it is open, and to chat otherwise.
+function RB:ExclusionStatus(text, r, g, b)
+    local panel = self.settingsPanel
+    if panel and panel:IsVisible() then
+        panel.exclusionStatus:SetText(text or "")
+        panel.exclusionStatus:SetTextColor(r or 0.82, g or 0.82, b or 0.82)
+    elseif text and text ~= "" then
+        PrintAddon(text)
+    end
+end
+
+function RB:UpdateExclusionList()
+    local panel = self.settingsPanel
+    if not panel or not panel.exclusionRows then
+        return
+    end
+
+    local exclusions = self.exclusions or {}
+    FauxScrollFrame_Update(panel.exclusionScroll, #exclusions, EXCLUSION_ROW_COUNT, EXCLUSION_ROW_HEIGHT)
+    local offset = FauxScrollFrame_GetOffset(panel.exclusionScroll) or 0
+    local missingItemInfo = false
+
+    for index = 1, EXCLUSION_ROW_COUNT do
+        local row = panel.exclusionRows[index]
+        local itemEntry = exclusions[offset + index]
+
+        if itemEntry then
+            local icon, name, link, _, missingInfo = GetItemDisplay(itemEntry)
+            if missingInfo then
+                missingItemInfo = true
+            end
+
+            row.itemEntry = itemEntry
+            row.icon:SetTexture(icon)
+            row.text:SetText(link or name)
+            row:Show()
+        else
+            row.itemEntry = nil
+            row:Hide()
+        end
+    end
+
+    if #exclusions == 0 then
+        panel.exclusionEmpty:SetText(self.exclusions and "No excluded items." or "Loading...")
+        panel.exclusionEmpty:Show()
+    else
+        panel.exclusionEmpty:Hide()
+    end
+
+    -- Item names the client hasn't seen yet arrive a moment later.
+    if missingItemInfo and (panel.exclusionRetries or 0) < 10 then
+        panel.exclusionRetries = (panel.exclusionRetries or 0) + 1
+        panel.exclusionRefreshAt = GetTime() + 1.0
+    else
+        panel.exclusionRetries = 0
+        panel.exclusionRefreshAt = nil
+    end
+end
+
 function RB:HideDepositPreview()
     if self.frame and self.frame.depositPreview then
         self.frame.depositPreview:Hide()
@@ -2981,6 +3355,10 @@ function RB:BuildDepositPreviewTitle(preview)
     if scope == "category" then
         local category = CATEGORY_BY_ID[tonumber(preview and preview.categoryId)]
         return "Deposit Preview: " .. tostring(category and category.name or "Category")
+    end
+
+    if scope == "exclusions" then
+        return "Deposit Preview: Exclusions"
     end
 
     return "Deposit Preview: All Bags"
@@ -3003,6 +3381,12 @@ function RB:RequestDepositPreview(scope, categoryId)
         return
     end
 
+    if scope == "exclusions" then
+        self:BeginBusy("request", "Building deposit preview...")
+        self:SendServerCommand("preview deposit exclusions")
+        return
+    end
+
     self:BeginBusy("request", "Building deposit preview...")
     self:SendServerCommand("preview deposit all")
 end
@@ -3013,7 +3397,11 @@ function RB:ShowDepositPreview(preview)
 
     if not preview or not preview.items or #preview.items == 0 then
         self:HideDepositPreview()
-        self:ClearBusy("No matching reagents were found in your bags.", 1.00, 0.82, 0.32)
+        if preview and preview.scope == "exclusions" then
+            self:ClearBusy("None of your excluded reagents are in your bags.", 1.00, 0.82, 0.32)
+        else
+            self:ClearBusy("No matching reagents were found in your bags.", 1.00, 0.82, 0.32)
+        end
         return
     end
 
@@ -3089,6 +3477,14 @@ function RB:RunDeposit(scope, categoryId)
         self:BeginBusy("mutation", "Depositing this category...")
         self:SendServerCommand("deposit category " .. tostring(categoryId), { action = "deposit", source = "manual" })
         self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "category", categoryId, self.currentPage or 0)
+        return
+    end
+
+    if scope == "exclusions" then
+        self.mutationNeedsRefresh = "root"
+        self:BeginBusy("mutation", "Depositing your excluded reagents...")
+        self:SendServerCommand("deposit exclusions", { action = "deposit", source = "manual" })
+        self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "root", nil, 0)
         return
     end
 
@@ -3232,6 +3628,8 @@ function RB:ApplyOptimisticWithdraw(itemEntry, amount)
     if self.currentView == "detail" then
         if self.detailItem and (tonumber(self.detailItem.amount) or 0) > 0 then
             self:ShowDetail(self.detailItem, true)
+        elseif self.detailOrigin == "search" then
+            self:RenderSearch(true)
         else
             self:RenderCategory(true)
         end
@@ -3267,8 +3665,9 @@ function RB:WithdrawItem(mode)
     local page = self.currentPage or 0
     local itemEntry = self.detailItem.entry
     local optimisticAmount = self:GetOptimisticWithdrawAmount(self.detailItem, mode)
+    local fromSearch = self:IsSearchDetail()
 
-    self.mutationNeedsRefresh = "category"
+    self.mutationNeedsRefresh = fromSearch and "search" or "category"
     self:BeginBusy("mutation", "Withdrawing item...")
     self:SendServerCommand("withdraw item " .. tostring(itemEntry) .. " " .. tostring(mode) .. " " .. tostring(categoryId) .. " " .. tostring(page))
 
@@ -3277,7 +3676,11 @@ function RB:WithdrawItem(mode)
         self:Status("Withdraw sent. Count updated locally; synchronizing...", 0.82, 0.82, 0.82)
     end
 
-    self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "category", categoryId, page)
+    if fromSearch then
+        self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "search")
+    else
+        self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "category", categoryId, page)
+    end
 end
 
 function RB:WithdrawItemExact()
@@ -3296,8 +3699,9 @@ function RB:WithdrawItemExact()
     local page = self.currentPage or 0
     local itemEntry = self.detailItem.entry
     local optimisticAmount = self:GetOptimisticWithdrawAmount(self.detailItem, "exact", amount)
+    local fromSearch = self:IsSearchDetail()
 
-    self.mutationNeedsRefresh = "category"
+    self.mutationNeedsRefresh = fromSearch and "search" or "category"
     self:BeginBusy("mutation", "Withdrawing exact amount...")
     self:SendServerCommand("withdraw item " .. tostring(itemEntry) .. " exact " .. tostring(amount) .. " " .. tostring(categoryId) .. " " .. tostring(page))
 
@@ -3311,7 +3715,11 @@ function RB:WithdrawItemExact()
         self.frame.exactBox:ClearFocus()
     end
 
-    self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "category", categoryId, page)
+    if fromSearch then
+        self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "search")
+    else
+        self:ScheduleRefresh(MUTATION_REFRESH_DELAY, "category", categoryId, page)
+    end
 end
 
 function RB:GetWithdrawPromptAmount()
@@ -4985,8 +5393,132 @@ function RB:CreateSettingsPanel()
     panel.autoDepositStatus:SetJustifyH("LEFT")
     panel.autoDepositStatus:SetText("")
 
+    panel.exclusionHeader = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    panel.exclusionHeader:SetPoint("TOPLEFT", panel.autoDepositStatus, "BOTTOMLEFT", 0, -22)
+    panel.exclusionHeader:SetJustifyH("LEFT")
+    panel.exclusionHeader:SetText("Deposit exclusions (this character)")
+
+    panel.exclusionNote = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    panel.exclusionNote:SetPoint("TOPLEFT", panel.exclusionHeader, "BOTTOMLEFT", 0, -6)
+    panel.exclusionNote:SetPoint("RIGHT", -32, 0)
+    panel.exclusionNote:SetJustifyH("LEFT")
+    panel.exclusionNote:SetText("Deposit All, Deposit Category and auto-deposit leave these in your bags; Deposit Exclusions banks them.")
+
+    panel.exclusionBox = self:CreateEditBox(panel, 230, 20, true)
+    panel.exclusionBox:SetNumeric(false)
+    panel.exclusionBox:SetPoint("TOPLEFT", panel.exclusionNote, "BOTTOMLEFT", 6, -10)
+    panel.exclusionBox:SetScript("OnEnterPressed", function()
+        RB:AddExclusionFromBox()
+    end)
+    panel.exclusionBox:SetScript("OnTextChanged", nil)
+    panel.exclusionBox:SetScript("OnReceiveDrag", function()
+        RB:AddCursorItemToExclusions()
+    end)
+    panel.exclusionBox:SetScript("OnMouseDown", function()
+        RB:AddCursorItemToExclusions()
+    end)
+
+    panel.exclusionAdd = self:CreateButton(panel, 80, 22, "Add", true)
+    panel.exclusionAdd:SetPoint("LEFT", panel.exclusionBox, "RIGHT", 10, 0)
+    panel.exclusionAdd:SetScript("OnClick", function()
+        RB:AddExclusionFromBox()
+    end)
+
+    panel.exclusionHint = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    panel.exclusionHint:SetPoint("TOPLEFT", panel.exclusionBox, "BOTTOMLEFT", -6, -6)
+    panel.exclusionHint:SetPoint("RIGHT", -32, 0)
+    panel.exclusionHint:SetJustifyH("LEFT")
+    panel.exclusionHint:SetText("Drag an item from your bags onto the box, Shift-click an item link into it, or type an item ID, then press Add.")
+
+    panel.exclusionList = CreateFrame("Frame", nil, panel)
+    panel.exclusionList:SetPoint("TOPLEFT", panel.exclusionHint, "BOTTOMLEFT", 0, -6)
+    panel.exclusionList:SetPoint("RIGHT", -32, 0)
+    panel.exclusionList:SetHeight((EXCLUSION_ROW_COUNT * EXCLUSION_ROW_HEIGHT) + 12)
+    panel.exclusionList:SetBackdrop(INSET_BACKDROP)
+    panel.exclusionList:SetBackdropColor(0.10, 0.10, 0.10, 1.00)
+    panel.exclusionList:SetBackdropBorderColor(0.40, 0.40, 0.40, 1.00)
+    panel.exclusionList:EnableMouse(true)
+    panel.exclusionList:SetScript("OnReceiveDrag", function()
+        RB:AddCursorItemToExclusions()
+    end)
+    panel.exclusionList:SetScript("OnMouseUp", function()
+        RB:AddCursorItemToExclusions()
+    end)
+
+    panel.exclusionEmpty = panel.exclusionList:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    panel.exclusionEmpty:SetPoint("TOPLEFT", 10, -10)
+    panel.exclusionEmpty:SetText("No excluded items.")
+
+    panel.exclusionRows = {}
+    for index = 1, EXCLUSION_ROW_COUNT do
+        local row = CreateFrame("Button", nil, panel.exclusionList)
+        row:SetHeight(EXCLUSION_ROW_HEIGHT)
+        row:SetPoint("LEFT", 6, 0)
+        row:SetPoint("RIGHT", -28, 0)
+        if index == 1 then
+            row:SetPoint("TOP", panel.exclusionList, "TOP", 0, -6)
+        else
+            row:SetPoint("TOP", panel.exclusionRows[index - 1], "BOTTOM", 0, 0)
+        end
+
+        row.icon = row:CreateTexture(nil, "ARTWORK")
+        row.icon:SetWidth(EXCLUSION_ROW_HEIGHT - 4)
+        row.icon:SetHeight(EXCLUSION_ROW_HEIGHT - 4)
+        row.icon:SetPoint("LEFT", 2, 0)
+
+        row.remove = self:CreateButton(row, 70, EXCLUSION_ROW_HEIGHT - 2, "Remove", true)
+        row.remove:SetPoint("RIGHT", 0, 0)
+        row.remove:SetScript("OnClick", function()
+            RB:RemoveExclusion(row.itemEntry)
+        end)
+
+        row.text = row:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+        row.text:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+        row.text:SetPoint("RIGHT", row.remove, "LEFT", -6, 0)
+        row.text:SetJustifyH("LEFT")
+
+        row:SetScript("OnEnter", function(selfRow)
+            if selfRow.itemEntry then
+                SetTooltipItem(selfRow.itemEntry)
+            end
+        end)
+        row:SetScript("OnLeave", HideTooltip)
+        row:Hide()
+
+        panel.exclusionRows[index] = row
+    end
+
+    panel.exclusionScroll = CreateFrame("ScrollFrame", "ReagentBankUIExclusionScrollFrame", panel.exclusionList, "FauxScrollFrameTemplate")
+    panel.exclusionScroll:SetPoint("TOPLEFT", panel.exclusionRows[1], "TOPLEFT", 0, 0)
+    panel.exclusionScroll:SetPoint("BOTTOMRIGHT", panel.exclusionRows[EXCLUSION_ROW_COUNT], "BOTTOMRIGHT", 0, 0)
+    panel.exclusionScroll:SetScript("OnVerticalScroll", function(selfScroll, offset)
+        FauxScrollFrame_OnVerticalScroll(selfScroll, offset, EXCLUSION_ROW_HEIGHT, function()
+            RB:UpdateExclusionList()
+        end)
+    end)
+
+    panel.exclusionStatus = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    panel.exclusionStatus:SetPoint("TOPLEFT", panel.exclusionList, "BOTTOMLEFT", 2, -6)
+    panel.exclusionStatus:SetPoint("RIGHT", -32, 0)
+    panel.exclusionStatus:SetJustifyH("LEFT")
+    panel.exclusionStatus:SetText("")
+
+    panel:SetScript("OnUpdate", function(selfPanel)
+        if selfPanel.exclusionRefreshAt and GetTime() >= selfPanel.exclusionRefreshAt then
+            selfPanel.exclusionRefreshAt = nil
+            RB:UpdateExclusionList()
+        end
+    end)
+
     panel:SetScript("OnShow", function()
         RB:UpdateSettingsPanel()
+        panel.exclusionStatus:SetText("")
+        RB:UpdateExclusionList()
+        RB:RequestExclusions()
+    end)
+
+    panel:SetScript("OnHide", function()
+        panel.exclusionBox:ClearFocus()
     end)
 
     self.settingsPanel = panel
@@ -5387,6 +5919,83 @@ function RB:CreateButton(parent, width, height, label, stock)
     return button
 end
 
+-- Gives a red button the Back button's blue art. With DragonUI the button keeps DragonUI's own red
+-- button skin, which only changes texture coordinates and shading for hover,
+-- press and disable, so swapping the sheet underneath is enough. Without it the
+-- stock art is hidden and the same three-slice is drawn here.
+function RB:SkinBackButton(button)
+    local skin = button._duiRedButton
+    if skin and skin.left then
+        for _, key in ipairs({ "left", "right", "middle", "hlLeft", "hlRight", "hlMiddle" }) do
+            if skin[key] then
+                skin[key]:SetTexture(BACK_BUTTON_TEXTURE)
+            end
+        end
+        return
+    end
+
+    local highlight = button:GetHighlightTexture()
+    local regions = { button:GetRegions() }
+    for i = 1, #regions do
+        local region = regions[i]
+        if region:GetObjectType() == "Texture" and region ~= highlight then
+            region:Hide()
+        end
+    end
+
+    local left = button:CreateTexture(nil, "BACKGROUND")
+    left:SetTexture(BACK_BUTTON_TEXTURE)
+    left:SetPoint("TOPLEFT", 0, 0)
+
+    local right = button:CreateTexture(nil, "BACKGROUND")
+    right:SetTexture(BACK_BUTTON_TEXTURE)
+    right:SetPoint("TOPRIGHT", 0, 0)
+
+    local middle = button:CreateTexture(nil, "BACKGROUND")
+    middle:SetTexture(BACK_BUTTON_TEXTURE)
+    middle:SetPoint("TOPLEFT", left, "TOPRIGHT", 0, 0)
+    middle:SetPoint("BOTTOMRIGHT", right, "BOTTOMLEFT", 0, 0)
+
+    local function apply(pushed)
+        local height = button:GetHeight() or 0
+        local cap = BACK_BUTTON_CAP_WIDTH * (height / BACK_BUTTON_ART_HEIGHT)
+        local width = button:GetWidth() or 0
+        if width > 0 and cap * 2 > width * 0.8 then
+            cap = width * 0.4
+        end
+        left:SetWidth(cap)
+        left:SetHeight(height)
+        right:SetWidth(cap)
+        right:SetHeight(height)
+
+        local rect = pushed and BACK_BUTTON_STATES.PUSHED or BACK_BUTTON_STATES.NORMAL
+        left:SetTexCoord(rect.cap[1], rect.cap[2], rect.cap[3], rect.cap[4])
+        right:SetTexCoord(rect.cap[2], rect.cap[1], rect.cap[3], rect.cap[4])
+        middle:SetTexCoord(rect.mid[1], rect.mid[2], rect.mid[3], rect.mid[4])
+
+        -- 3.3.5 IsEnabled returns 1 or 0.
+        local enabled = button:IsEnabled()
+        local off = not enabled or enabled == 0
+        local shade = off and 0.55 or 1
+        for _, texture in ipairs({ left, right, middle }) do
+            texture:SetDesaturated(off)
+            texture:SetVertexColor(shade, shade, shade)
+        end
+    end
+
+    button:HookScript("OnMouseDown", function(selfButton)
+        local enabled = selfButton:IsEnabled()
+        apply(enabled and enabled ~= 0)
+    end)
+    button:HookScript("OnMouseUp", function() apply(false) end)
+    button:HookScript("OnLeave", function() apply(false) end)
+    button:HookScript("OnEnable", function() apply(false) end)
+    button:HookScript("OnDisable", function() apply(false) end)
+    button:HookScript("OnShow", function() apply(false) end)
+    button:HookScript("OnSizeChanged", function() apply(false) end)
+    apply(false)
+end
+
 -- DragonUI's inputs: the stock box with its border darkened to a plain well.
 local function SkinEditBox(box)
     local regions = { box:GetRegions() }
@@ -5498,6 +6107,17 @@ function RB:CreateFrame()
         ReagentBankUIDB.yOfs = yOfs
     end)
 
+    -- Escape closes the window like any other. Hiding it that way skips RB:Close,
+    -- so its cleanup runs from OnHide (but not when Alt-Z hides the whole UI).
+    tinsert(UISpecialFrames, "ReagentBankUIFrame")
+    f:SetScript("OnHide", function()
+        if not RB.closingFrame and UIParent:IsShown() then
+            RB.closingFrame = true
+            RB:Close()
+            RB.closingFrame = nil
+        end
+    end)
+
     self:MakeBackdrop(f)
 
     f.header = CreateFrame("Frame", nil, f)
@@ -5530,6 +6150,33 @@ function RB:CreateFrame()
     f.modeText:SetPoint("LEFT", f.header, "LEFT", 12, modeY)
     f.modeText:SetPoint("RIGHT", f.header, "RIGHT", -12, modeY)
 
+    -- Search sits on the home screen's top line, right of the mode text.
+    f.searchBox = self:CreateEditBox(f.header, SEARCH_BOX_WIDTH, 20)
+    f.searchBox:SetNumeric(false)
+    f.searchBox:SetMaxLetters(40)
+    f.searchBox:SetPoint("RIGHT", f.header, "RIGHT", -12, modeY - SEARCH_BOX_DROP)
+    f.modeText:SetPoint("RIGHT", f.searchBox, "LEFT", -16, SEARCH_BOX_DROP)
+    f.searchBox:SetScript("OnTextChanged", function(selfBox)
+        RB:UpdateSearchHint()
+        if not RB.settingSearchText then
+            RB:OnSearchTextChanged()
+        end
+    end)
+    f.searchBox:SetScript("OnEnterPressed", function(selfBox)
+        selfBox:ClearFocus()
+        RB:SearchNow()
+    end)
+    f.searchBox:SetScript("OnEditFocusGained", function()
+        RB:UpdateSearchHint()
+    end)
+    f.searchBox:SetScript("OnEditFocusLost", function()
+        RB:UpdateSearchHint()
+    end)
+
+    f.searchHint = f.searchBox:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    f.searchHint:SetPoint("LEFT", 2, 0)
+    f.searchHint:SetText("Search reagents...")
+
     f.rootDeposit = self:CreateButton(f, ROOT_ACTION_BUTTON_WIDTH, ROOT_BUTTON_HEIGHT, "Deposit All")
     f.rootDeposit:SetPoint("TOPLEFT", ROOT_BUTTON_ROW_X, ROOT_BUTTON_ROW_Y)
     f.rootDeposit:SetScript("OnClick", function()
@@ -5545,13 +6192,7 @@ function RB:CreateFrame()
     f.refresh = self:CreateButton(f, ROOT_REFRESH_BUTTON_WIDTH, ROOT_BUTTON_HEIGHT, "Refresh")
     f.refresh:SetPoint("LEFT", f.rootWithdraw, "RIGHT", ROOT_BUTTON_GAP, 0)
     f.refresh:SetScript("OnClick", function()
-        if RB.currentView == "category" and RB.currentCategoryId then
-            RB:RequestCategory(RB.currentCategoryId, RB.currentPage or 0)
-        elseif RB.currentView == "detail" and RB.currentCategoryId then
-            RB:RequestCategory(RB.currentCategoryId, RB.currentPage or 0)
-        else
-            RB:RequestRoot()
-        end
+        RB:RefreshCurrentView()
     end)
 
     f.sortMode = self:CreateButton(f, ROOT_SORT_BUTTON_WIDTH, ROOT_BUTTON_HEIGHT, "Sort: ID")
@@ -5596,8 +6237,32 @@ function RB:CreateFrame()
     f.back = self:CreateButton(f, CATEGORY_BACK_BUTTON_WIDTH, CATEGORY_BUTTON_HEIGHT, "Categories")
     f.back:SetPoint("TOPLEFT", CATEGORY_BUTTON_ROW_X, CATEGORY_BUTTON_ROW_Y)
     f.back:SetScript("OnClick", function()
+        RB:ClearSearch()
         RB:RequestRoot()
     end)
+
+    -- Blue Back: in a category it replaces Categories (back to the home screen);
+    -- on an item it sits left of Categories and goes back to where the item was opened.
+    f.navBack = self:CreateButton(f, CATEGORY_BACK_BUTTON_WIDTH, CATEGORY_BUTTON_HEIGHT, "Back")
+    f.navBack:SetPoint("TOPLEFT", CATEGORY_BUTTON_ROW_X, CATEGORY_BUTTON_ROW_Y)
+    self:SkinBackButton(f.navBack)
+    f.navBack:SetScript("OnClick", function()
+        RB:GoBack()
+    end)
+
+    f.depositExclusions = self:CreateButton(f, DEPOSIT_EXCLUSIONS_BUTTON_WIDTH, CATEGORY_BUTTON_HEIGHT, "Deposit Exclusions")
+    f.depositExclusions:SetPoint("TOPLEFT", CATEGORY_BUTTON_ROW_X, CATEGORY_BUTTON_ROW_Y)
+    f.depositExclusions:SetScript("OnClick", function()
+        RB:DepositExclusions()
+    end)
+    f.depositExclusions:SetScript("OnEnter", function(selfButton)
+        GameTooltip:SetOwner(selfButton, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Deposit Exclusions", 1, 0.82, 0)
+        GameTooltip:AddLine("Deposits the items on this character's exclusion list, which Deposit All, Deposit Category and auto-deposit leave in your bags.", 1, 1, 1, true)
+        GameTooltip:AddLine("Edit the list in /rbank settings.", 0.78, 0.82, 0.88, true)
+        GameTooltip:Show()
+    end)
+    f.depositExclusions:SetScript("OnLeave", HideTooltip)
 
     f.catDeposit = self:CreateButton(f, CATEGORY_ACTION_BUTTON_WIDTH, CATEGORY_BUTTON_HEIGHT, "Deposit Category")
     f.catDeposit:SetPoint("LEFT", f.back, "RIGHT", CATEGORY_BUTTON_GAP, 0)
@@ -5767,8 +6432,12 @@ function RB:CreateFrame()
                     RB:ShowWithdrawPrompt(selfRow.item)
                 else
                     RB:HideWithdrawPrompt()
+                    RB.detailOrigin = "category"
                     RB:ShowDetail(selfRow.item)
                 end
+            elseif selfRow.kind == "search" and selfRow.item then
+                RB:HideWithdrawPrompt()
+                RB:ShowSearchResultDetail(selfRow.item)
             elseif selfRow.kind == "shopping" and selfRow.item then
                 if mouseButton == "RightButton" then
                     if IsShiftKeyDown and IsShiftKeyDown() then
@@ -5783,7 +6452,7 @@ function RB:CreateFrame()
         end)
 
         row:SetScript("OnEnter", function(selfRow)
-            if (selfRow.kind == "item" or selfRow.kind == "shopping") and selfRow.item and selfRow.item.entry then
+            if (selfRow.kind == "item" or selfRow.kind == "search" or selfRow.kind == "shopping") and selfRow.item and selfRow.item.entry then
                 SetTooltipItem(selfRow.item.entry)
             end
         end)
@@ -5888,16 +6557,6 @@ function RB:CreateFrame()
     f.addShopping:SetPoint("LEFT", f.shoppingAmountBox, "RIGHT", 10, 0)
     f.addShopping:SetScript("OnClick", function()
         RB:AddDetailItemToShoppingList()
-    end)
-
-    f.detailBack = self:CreateButton(f.detail, 132, 28, "Back to List")
-    f.detailBack:SetPoint("LEFT", f.withdrawItemAll, "RIGHT", 10, 0)
-    f.detailBack:SetScript("OnClick", function()
-        if RB.currentCategoryId then
-            RB:RenderCategory()
-        else
-            RB:RequestRoot()
-        end
     end)
 
     f.detail:SetScript("OnEnter", function()
@@ -6188,7 +6847,8 @@ function RB:SetCommonVisibility(view)
     self:CreateFrame()
 
     local f = self.frame
-    local rootView = view == "root"
+    local searchView = view == "search"
+    local homeView = view == "root" or searchView
     local categoryView = view == "category"
     local detailView = view == "detail"
     local shoppingView = view == "shopping"
@@ -6198,10 +6858,34 @@ function RB:SetCommonVisibility(view)
     f.refresh:Show()
     f.shoppingList:Show()
 
-    if categoryView or detailView or shoppingView then
+    -- Categories keeps the row's first slot (Deposit Category hangs off it) except
+    -- on an item, where the blue Back takes that slot and Categories follows it.
+    f.back:ClearAllPoints()
+    if detailView then
+        f.back:SetPoint("LEFT", f.navBack, "RIGHT", CATEGORY_BUTTON_GAP, 0)
+    else
+        f.back:SetPoint("TOPLEFT", CATEGORY_BUTTON_ROW_X, CATEGORY_BUTTON_ROW_Y)
+    end
+
+    if detailView or shoppingView then
         f.back:Show()
     else
         f.back:Hide()
+    end
+
+    if categoryView or detailView then
+        f.navBack:Show()
+    else
+        f.navBack:Hide()
+    end
+
+    if homeView then
+        f.depositExclusions:Show()
+        f.searchBox:Show()
+    else
+        f.depositExclusions:Hide()
+        f.searchBox:ClearFocus()
+        f.searchBox:Hide()
     end
 
     if categoryView then
@@ -6234,7 +6918,7 @@ function RB:SetCommonVisibility(view)
         f.shoppingPageText:Hide()
     end
 
-    if rootView or categoryView or shoppingView then
+    if homeView or categoryView or shoppingView then
         f.list:Show()
     else
         f.list:Hide()
@@ -6270,10 +6954,12 @@ function RB:UpdateControls()
     self:SetButtonEnabled(f.refresh, not busy)
     self:SetButtonEnabled(f.rootDeposit, not busy)
     self:SetButtonEnabled(f.rootWithdraw, not busy)
-    self:SetButtonEnabled(f.sortMode, not busy and not inShopping)
+    self:SetButtonEnabled(f.sortMode, not busy and not inShopping and self.currentView ~= "search")
     self:SetButtonEnabled(f.previewToggle, not busy)
     self:SetButtonEnabled(f.shoppingList, not busy)
     self:SetButtonEnabled(f.back, not busy)
+    self:SetButtonEnabled(f.navBack, not busy)
+    self:SetButtonEnabled(f.depositExclusions, not busy)
     self:SetButtonEnabled(f.catDeposit, not busy and inCategory and hasCategory)
     self:SetButtonEnabled(f.catWithdraw, not busy and inCategory and hasCategory)
     self:SetButtonEnabled(f.prev, not busy and inCategory and page > 0)
@@ -6303,7 +6989,6 @@ function RB:UpdateControls()
     self:SetButtonEnabled(f.withdrawItemAll, not busy and inDetail and stored >= 1)
     self:SetButtonEnabled(f.withdrawExact, not busy and inDetail and stored >= 1 and exactAmount >= 1)
     self:SetButtonEnabled(f.addShopping, not busy and inDetail and shoppingAmount >= 1)
-    self:SetButtonEnabled(f.detailBack, not busy)
 
     if f.depositPreview then
         self:SetButtonEnabled(f.depositPreview.confirm, not busy and self.depositPreview ~= nil)
@@ -6458,6 +7143,11 @@ function RB:RefreshListWindow()
 end
 
 function RB:RenderRoot(preserveStatus)
+    if self.searchQuery and self.searchResults then
+        self:RenderSearch(preserveStatus)
+        return
+    end
+
     self:HideWithdrawPrompt()
     self:HideShoppingAmountPrompt()
     self:CreateFrame()
@@ -6802,6 +7492,7 @@ function RB:Close()
     self.pendingRefresh = nil
     self.mutationNeedsRefresh = nil
     self:ClearItemInfoRefresh()
+    self:ClearSearch()
 
     HideTooltip()
 
@@ -6839,6 +7530,8 @@ function RB:HandleOK(okText)
 
         if refreshTarget == "category" and self.currentCategoryId then
             self:ScheduleRefresh(0.25, "category", self.currentCategoryId, self.currentPage or 0)
+        elseif refreshTarget == "search" and self.searchQuery then
+            self:ScheduleRefresh(0.25, "search")
         else
             self:ScheduleRefresh(0.25, "root", nil, 0)
         end
@@ -6882,6 +7575,18 @@ function RB:HandleProtocol(message)
     local errText = string.match(message, "^RBANK:ERR:(.*)$")
     if errText then
         self:HandleError(errText)
+        return true
+    end
+
+    local exclusionOk = string.match(message, "^RBANK:EXCL:OK:(.*)$")
+    if exclusionOk then
+        self:ExclusionStatus(Trim(exclusionOk), 0.45, 1.00, 0.45)
+        return true
+    end
+
+    local exclusionErr = string.match(message, "^RBANK:EXCL:ERR:(.*)$")
+    if exclusionErr then
+        self:ExclusionStatus(Trim(exclusionErr), 1.00, 0.35, 0.35)
         return true
     end
 
@@ -7058,6 +7763,74 @@ function RB:HandleProtocol(message)
         return true
     end
 
+    if recordType == "SEARCH" then
+        local searchKind = parts[3]
+
+        if searchKind == "BEGIN" then
+            -- The server echoes the search text after the count (it may hold colons).
+            local query = string.match(message, "^RBANK:SEARCH:BEGIN:%d+:(.*)$")
+            self.pendingSearch = { query = query, items = {} }
+        elseif searchKind == "ITEM" then
+            if self.pendingSearch then
+                local itemEntry = tonumber(parts[4])
+                local amount = tonumber(parts[5]) or 0
+
+                if itemEntry and itemEntry > 0 then
+                    self:CacheBankItemCount(itemEntry, amount)
+                end
+
+                if itemEntry and itemEntry > 0 and amount > 0 then
+                    table.insert(self.pendingSearch.items, {
+                        entry = math.floor(itemEntry),
+                        amount = math.floor(amount),
+                        categoryId = tonumber(parts[6]),
+                    })
+                end
+            end
+        elseif searchKind == "END" then
+            local search = self.pendingSearch
+            self.pendingSearch = nil
+
+            if self.awaitingView == "search" then
+                self.awaitingView = nil
+            end
+            self:ClearBusy()
+
+            -- An older search answered after a newer one was typed: skip it.
+            if search and search.query and search.query == self.searchQuery then
+                self.searchResults = search.items
+                local view = self.currentView
+                if self.frame and self.frame:IsShown() and (view == "root" or view == "search" or self:IsSearchDetail()) then
+                    self:RenderSearch(true)
+                    self:Status(tostring(#search.items) .. " result(s). Click an item to withdraw it.", 0.45, 1.00, 0.45)
+                end
+            end
+        end
+
+        return true
+    end
+
+    if recordType == "EXCL" then
+        local exclusionKind = parts[3]
+
+        if exclusionKind == "BEGIN" then
+            self.pendingExclusions = {}
+        elseif exclusionKind == "ITEM" then
+            local itemEntry = tonumber(parts[4])
+            if self.pendingExclusions and itemEntry and itemEntry > 0 then
+                table.insert(self.pendingExclusions, math.floor(itemEntry))
+            end
+        elseif exclusionKind == "END" then
+            if self.pendingExclusions then
+                self.exclusions = self.pendingExclusions
+                self.pendingExclusions = nil
+                self:UpdateExclusionList()
+            end
+        end
+
+        return true
+    end
+
     if recordType == "BEGIN" then
         local view = parts[3]
 
@@ -7131,6 +7904,12 @@ function RB:HandleProtocol(message)
 
             if self:IsAutoDepositViewSuppressed() then
                 self.autoDepositSuppressViewUntil = nil
+                return true
+            end
+
+            -- While searching, the home screen shows the results: fetch them fresh.
+            if self.searchQuery and (self.currentView == "search" or self:IsSearchDetail()) then
+                self:RequestSearch(self.searchQuery)
                 return true
             end
 
@@ -7223,6 +8002,17 @@ if hooksecurefunc and HandleModifiedItemClick then
     end)
 end
 
+-- Shift-clicking an item while the exclusion box has focus puts its link there.
+if hooksecurefunc and ChatEdit_InsertLink then
+    hooksecurefunc("ChatEdit_InsertLink", function(link)
+        local panel = RB.settingsPanel
+        local box = panel and panel.exclusionBox
+        if box and box:IsVisible() and box:HasFocus() and ParseItemIdFromLink(link) then
+            box:SetText(link)
+        end
+    end)
+end
+
 if hooksecurefunc and PlaceAuctionBid then
     hooksecurefunc("PlaceAuctionBid", function(listType, index, bid)
         RB:OnPlaceAuctionBid(listType, index, bid)
@@ -7274,13 +8064,7 @@ SlashCmdList["REAGENTBANKUI"] = function(msg)
     end
 
     if command == "refresh" then
-        if RB.currentView == "category" and RB.currentCategoryId then
-            RB:RequestCategory(RB.currentCategoryId, RB.currentPage or 0)
-        elseif RB.currentView == "detail" and RB.currentCategoryId then
-            RB:RequestCategory(RB.currentCategoryId, RB.currentPage or 0)
-        else
-            RB:RequestRoot()
-        end
+        RB:RefreshCurrentView()
         return
     end
 

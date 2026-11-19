@@ -1,6 +1,15 @@
-# Reagent Bank Account
+# Reagent Bank Account 2.13.2
 
-A reagent bank system for AzerothCore with a required WotLK 3.3.5a UI addon.
+<div align="center">
+
+![Interface Version](https://img.shields.io/badge/Interface-30300-blue)
+![WoW Version](https://img.shields.io/badge/WoW-3.3.5a-orange)
+[![Version](https://img.shields.io/badge/Version-2.13.2-green)](https://github.com/EvilTactician/mod-reagent-bank-account)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+
+**A reagent bank system for AzerothCore with a required WotLK 3.3.5a UI addon.**
+
+</div>
 
 This module adds a server-backed reagent bank for trade goods, gems, and crafting materials. The addon provides the full player-facing interface: browsing stored reagents, depositing, withdrawing, profession prep, and Auction House shopping-list support.
 
@@ -16,6 +25,10 @@ This module adds a server-backed reagent bank for trade goods, gems, and craftin
 - Category browsing for common reagent types
 - Deposit all reagents
 - Deposit by category
+- Search the whole bank from the home screen (at least 3 characters); click a result to withdraw it
+- Personal deposit exclusions per character, with a **Deposit Exclusions** button to bank them on demand (see below)
+- Blue **Back** buttons: from a category back to the home screen, and from an item back to the category or search results it was opened from
+- Escape closes the window, like the default UI's windows
 - Withdraw all, category, stack, single item, or exact amount
 - Optional deposit preview confirmation
 - Reverse last deposit/withdraw transaction
@@ -34,13 +47,21 @@ This module adds a server-backed reagent bank for trade goods, gems, and craftin
 - Soulbound and quest-bound items stay in your bags, since the bank can be shared between characters, unless the inclusions table lists them (the archaeology keystones are soulbound). Conjured and timed items always stay in your bags
 - Archaeology keystones: the deposit inclusions list all seven mod-archaeology keystones under Other Trade Goods (apply the updated SQL and restart to reload inclusions). ArchaeologyUI has a Bank slot for exact-quantity withdrawals into bags through the existing server command
 
-Deposits skip any item a quest in your log asks for, so auto-deposit cannot take quest items before you turn them in. Deposits are refused while a trade window is open, and periodic auto-deposit waits until the trade is closed. Mages keep their Light Feathers for Slow Fall: Deposit All, category deposits and auto-deposit leave them in the bags, though a mage can still deposit them one item at a time.
+Deposits skip any item a quest in your log asks for, so auto-deposit cannot take quest items before you turn them in. Deposits are refused while a trade window is open, and periodic auto-deposit waits until the trade is closed.
+
+Class spell reagents stay with the classes that need them: if a character has learned a class spell that uses an item as a reagent (Light Feather for a mage's Slow Fall or a priest's Levitate), Deposit All, category deposits and auto-deposit leave it in the bags. Other classes, and characters who haven't learned the spell yet or have a glyph that removes the reagent, bank it as usual. Depositing the item on its own still works for everyone.
+
+### Personal deposit exclusions
+
+Each character has its own list of items that Deposit All, Deposit Category and auto-deposit leave in the bags. Edit it in the addon settings (`/rbank settings`): drop an item on the box, Shift-click an item link into it, or type an item ID. Only items the reagent bank accepts can be added, and the list is kept on the server, so it follows the character to any PC.
+
+**Deposit Exclusions** on the home screen deposits just the items on that list (with a preview when **Preview: On**). It uses the same checks as every other deposit, so it can never put anything in the bank that wouldn't otherwise go there. Depositing a single item from its own screen ignores the list.
 
 ---
 
 ## Profession Integration
 
-The profession controls live in the profession window itself. With [RetailProfessions](https://github.com/buildthehomelab/wow-mod-retail-professions):
+The profession controls live in the profession window itself. With [RetailProfessions](https://github.com/EvilTactician/wow-mod-retail-professions):
 
 - **Create** and **Create All** count the reagent bank and take what your bags are missing out of it before crafting (**Use reagent bank**)
 - **Deposit leftovers** puts reagents that came out of the bank and weren't used back when you close the window
@@ -104,11 +125,11 @@ When [Auctionator](https://github.com/buildthehomelab/wow-addon-Auctionator) is 
 
    ```bash
    cd modules
-   git clone https://github.com/buildthehomelab/mod-reagent-bank-account.git
+   git clone https://github.com/EvilTactician/mod-reagent-bank-account.git
    ```
 
 2. Rebuild the server.
-3. Apply the SQL in `data/sql/db-characters/base` and `data/sql/db-world/base` if your server doesn't apply module SQL by itself (`mod_reagent_bank_account` and the deposit inclusions/exclusions tables).
+3. Apply the SQL in `data/sql/db-characters/base` and `data/sql/db-world/base` if your server doesn't apply module SQL by itself (`mod_reagent_bank_account`, the personal exclusions table and the deposit inclusions/exclusions tables). The module also creates any missing tables at startup.
 4. Copy `conf/mod_reagent_bank_account.conf.dist` to `conf/mod_reagent_bank_account.conf` and adjust it (see Configuration), then start the server.
 
 ### Addon
