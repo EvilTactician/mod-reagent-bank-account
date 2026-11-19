@@ -6504,12 +6504,6 @@ function RB:CreateFrame()
         RB:AddDetailItemToShoppingList()
     end)
 
-    f.detailBack = self:CreateButton(f.detail, 132, 28, "Back to List")
-    f.detailBack:SetPoint("LEFT", f.withdrawItemAll, "RIGHT", 10, 0)
-    f.detailBack:SetScript("OnClick", function()
-        RB:GoBack()
-    end)
-
     f.detail:SetScript("OnEnter", function()
         if RB.detailItem and RB.detailItem.entry then
             SetTooltipItem(RB.detailItem.entry)
@@ -6940,7 +6934,6 @@ function RB:UpdateControls()
     self:SetButtonEnabled(f.withdrawItemAll, not busy and inDetail and stored >= 1)
     self:SetButtonEnabled(f.withdrawExact, not busy and inDetail and stored >= 1 and exactAmount >= 1)
     self:SetButtonEnabled(f.addShopping, not busy and inDetail and shoppingAmount >= 1)
-    self:SetButtonEnabled(f.detailBack, not busy)
 
     if f.depositPreview then
         self:SetButtonEnabled(f.depositPreview.confirm, not busy and self.depositPreview ~= nil)
