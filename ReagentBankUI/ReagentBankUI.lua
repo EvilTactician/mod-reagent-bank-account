@@ -152,9 +152,18 @@ local CATEGORY_BUTTON_GAP = 8
 local CATEGORY_PAGE_TEXT_GAP = 10
 local CATEGORY_PAGE_TEXT_WIDTH = 104
 local DEPOSIT_EXCLUSIONS_BUTTON_WIDTH = 148
--- The Back button is the red button art, greyed and tinted green so it stands out.
-local BACK_BUTTON_TINT = { 0.45, 1.00, 0.45 }
+-- The Back button's art: DragonUI's red three-slice sheet (MIT, NeticSoul) with its
+-- red and green channels swapped, so it stands out from the red buttons.
+local GREEN_BUTTON_TEXTURE = "Interface\\AddOns\\ReagentBankUI\\Textures\\GreenButton"
+local GREEN_BUTTON_CAP_WIDTH = 114
+local GREEN_BUTTON_ART_HEIGHT = 128
+local GREEN_BUTTON_STATES = {
+    NORMAL = { cap = { 4/256, 61/256, 76/256, 140/256 }, mid = { 4/256, 36/256, 148/256, 212/256 } },
+    PUSHED = { cap = { 136/256, 193/256, 76/256, 140/256 }, mid = { 84/256, 116/256, 148/256, 212/256 } },
+}
 local SEARCH_BOX_WIDTH = 210
+-- How far the search box sits below the mode text's line.
+local SEARCH_BOX_DROP = 3
 local SEARCH_MIN_LENGTH = 3
 local SEARCH_DELAY = 0.45
 local EXCLUSION_ROW_COUNT = 8
@@ -5393,7 +5402,7 @@ function RB:CreateSettingsPanel()
     panel.exclusionNote:SetPoint("TOPLEFT", panel.exclusionHeader, "BOTTOMLEFT", 0, -6)
     panel.exclusionNote:SetPoint("RIGHT", -32, 0)
     panel.exclusionNote:SetJustifyH("LEFT")
-    panel.exclusionNote:SetText("Deposit All, Deposit Category and auto-deposit leave these items in your bags; Deposit Exclusions on the home screen banks them. Drop an item on the box, Shift-click an item link into it, or type an item ID.")
+    panel.exclusionNote:SetText("Deposit All, Deposit Category and auto-deposit leave these in your bags; Deposit Exclusions banks them.")
 
     panel.exclusionBox = self:CreateEditBox(panel, 230, 20, true)
     panel.exclusionBox:SetNumeric(false)
@@ -5415,8 +5424,14 @@ function RB:CreateSettingsPanel()
         RB:AddExclusionFromBox()
     end)
 
+    panel.exclusionHint = panel:CreateFontString(nil, "ARTWORK", "GameFontDisableSmall")
+    panel.exclusionHint:SetPoint("TOPLEFT", panel.exclusionBox, "BOTTOMLEFT", -6, -6)
+    panel.exclusionHint:SetPoint("RIGHT", -32, 0)
+    panel.exclusionHint:SetJustifyH("LEFT")
+    panel.exclusionHint:SetText("Drag an item from your bags onto the box, Shift-click an item link into it, or type an item ID, then press Add.")
+
     panel.exclusionList = CreateFrame("Frame", nil, panel)
-    panel.exclusionList:SetPoint("TOPLEFT", panel.exclusionBox, "BOTTOMLEFT", -6, -8)
+    panel.exclusionList:SetPoint("TOPLEFT", panel.exclusionHint, "BOTTOMLEFT", 0, -6)
     panel.exclusionList:SetPoint("RIGHT", -32, 0)
     panel.exclusionList:SetHeight((EXCLUSION_ROW_COUNT * EXCLUSION_ROW_HEIGHT) + 12)
     panel.exclusionList:SetBackdrop(INSET_BACKDROP)
@@ -5904,41 +5919,81 @@ function RB:CreateButton(parent, width, height, label, stock)
     return button
 end
 
--- Greys the button's art and tints it, leaving the hover glow alone. Works on
--- the stock red button and on DragonUI's. The button swaps its art when it is
--- pressed, enabled or disabled, so the tint goes back on after each of those.
-function RB:TintButton(button, color)
-    local function apply()
-        local highlight = button:GetHighlightTexture()
-
-        local function tint(texture)
-            if texture and texture ~= highlight and texture.SetVertexColor then
-                if texture.SetDesaturated then
-                    texture:SetDesaturated(true)
-                end
-                texture:SetVertexColor(color[1], color[2], color[3])
+-- Turns a red button green. With DragonUI the button keeps DragonUI's own red
+-- button skin, which only changes texture coordinates and shading for hover,
+-- press and disable, so swapping the sheet underneath is enough. Without it the
+-- stock art is hidden and the same three-slice is drawn here.
+function RB:SkinGreenButton(button)
+    local skin = button._duiRedButton
+    if skin and skin.left then
+        for _, key in ipairs({ "left", "right", "middle", "hlLeft", "hlRight", "hlMiddle" }) do
+            if skin[key] then
+                skin[key]:SetTexture(GREEN_BUTTON_TEXTURE)
             end
         end
+        return
+    end
 
-        tint(button:GetNormalTexture())
-        tint(button:GetPushedTexture())
-        tint(button:GetDisabledTexture())
-
-        local regions = { button:GetRegions() }
-        for i = 1, #regions do
-            local region = regions[i]
-            if region:GetObjectType() == "Texture" then
-                tint(region)
-            end
+    local highlight = button:GetHighlightTexture()
+    local regions = { button:GetRegions() }
+    for i = 1, #regions do
+        local region = regions[i]
+        if region:GetObjectType() == "Texture" and region ~= highlight then
+            region:Hide()
         end
     end
 
-    apply()
-    button:HookScript("OnEnable", apply)
-    button:HookScript("OnDisable", apply)
-    button:HookScript("OnMouseDown", apply)
-    button:HookScript("OnMouseUp", apply)
-    button:HookScript("OnShow", apply)
+    local left = button:CreateTexture(nil, "BACKGROUND")
+    left:SetTexture(GREEN_BUTTON_TEXTURE)
+    left:SetPoint("TOPLEFT", 0, 0)
+
+    local right = button:CreateTexture(nil, "BACKGROUND")
+    right:SetTexture(GREEN_BUTTON_TEXTURE)
+    right:SetPoint("TOPRIGHT", 0, 0)
+
+    local middle = button:CreateTexture(nil, "BACKGROUND")
+    middle:SetTexture(GREEN_BUTTON_TEXTURE)
+    middle:SetPoint("TOPLEFT", left, "TOPRIGHT", 0, 0)
+    middle:SetPoint("BOTTOMRIGHT", right, "BOTTOMLEFT", 0, 0)
+
+    local function apply(pushed)
+        local height = button:GetHeight() or 0
+        local cap = GREEN_BUTTON_CAP_WIDTH * (height / GREEN_BUTTON_ART_HEIGHT)
+        local width = button:GetWidth() or 0
+        if width > 0 and cap * 2 > width * 0.8 then
+            cap = width * 0.4
+        end
+        left:SetWidth(cap)
+        left:SetHeight(height)
+        right:SetWidth(cap)
+        right:SetHeight(height)
+
+        local rect = pushed and GREEN_BUTTON_STATES.PUSHED or GREEN_BUTTON_STATES.NORMAL
+        left:SetTexCoord(rect.cap[1], rect.cap[2], rect.cap[3], rect.cap[4])
+        right:SetTexCoord(rect.cap[2], rect.cap[1], rect.cap[3], rect.cap[4])
+        middle:SetTexCoord(rect.mid[1], rect.mid[2], rect.mid[3], rect.mid[4])
+
+        -- 3.3.5 IsEnabled returns 1 or 0.
+        local enabled = button:IsEnabled()
+        local off = not enabled or enabled == 0
+        local shade = off and 0.55 or 1
+        for _, texture in ipairs({ left, right, middle }) do
+            texture:SetDesaturated(off)
+            texture:SetVertexColor(shade, shade, shade)
+        end
+    end
+
+    button:HookScript("OnMouseDown", function(selfButton)
+        local enabled = selfButton:IsEnabled()
+        apply(enabled and enabled ~= 0)
+    end)
+    button:HookScript("OnMouseUp", function() apply(false) end)
+    button:HookScript("OnLeave", function() apply(false) end)
+    button:HookScript("OnEnable", function() apply(false) end)
+    button:HookScript("OnDisable", function() apply(false) end)
+    button:HookScript("OnShow", function() apply(false) end)
+    button:HookScript("OnSizeChanged", function() apply(false) end)
+    apply(false)
 end
 
 -- DragonUI's inputs: the stock box with its border darkened to a plain well.
@@ -6099,8 +6154,8 @@ function RB:CreateFrame()
     f.searchBox = self:CreateEditBox(f.header, SEARCH_BOX_WIDTH, 20)
     f.searchBox:SetNumeric(false)
     f.searchBox:SetMaxLetters(40)
-    f.searchBox:SetPoint("RIGHT", f.header, "RIGHT", -12, modeY)
-    f.modeText:SetPoint("RIGHT", f.searchBox, "LEFT", -16, 0)
+    f.searchBox:SetPoint("RIGHT", f.header, "RIGHT", -12, modeY - SEARCH_BOX_DROP)
+    f.modeText:SetPoint("RIGHT", f.searchBox, "LEFT", -16, SEARCH_BOX_DROP)
     f.searchBox:SetScript("OnTextChanged", function(selfBox)
         RB:UpdateSearchHint()
         if not RB.settingSearchText then
@@ -6190,7 +6245,7 @@ function RB:CreateFrame()
     -- on an item it sits left of Categories and goes back to where the item was opened.
     f.navBack = self:CreateButton(f, CATEGORY_BACK_BUTTON_WIDTH, CATEGORY_BUTTON_HEIGHT, "Back")
     f.navBack:SetPoint("TOPLEFT", CATEGORY_BUTTON_ROW_X, CATEGORY_BUTTON_ROW_Y)
-    self:TintButton(f.navBack, BACK_BUTTON_TINT)
+    self:SkinGreenButton(f.navBack)
     f.navBack:SetScript("OnClick", function()
         RB:GoBack()
     end)
