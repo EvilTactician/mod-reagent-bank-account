@@ -1,6 +1,15 @@
-# Reagent Bank Account
+# Reagent Bank Account 2.11.0
 
-A reagent bank system for AzerothCore with a required WotLK 3.3.5a UI addon.
+<div align="center">
+
+![Interface Version](https://img.shields.io/badge/Interface-30300-blue)
+![WoW Version](https://img.shields.io/badge/WoW-3.3.5a-orange)
+[![Version](https://img.shields.io/badge/Version-2.11.0-green)](https://github.com/EvilTactician/mod-reagent-bank-account)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+
+**A reagent bank system for AzerothCore with a required WotLK 3.3.5a UI addon.**
+
+</div>
 
 This module adds a server-backed reagent bank for trade goods, gems, and crafting materials. The addon provides the full player-facing interface: browsing stored reagents, depositing, withdrawing, profession prep, and Auction House shopping-list support.
 
