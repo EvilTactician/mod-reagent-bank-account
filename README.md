@@ -52,7 +52,7 @@ Each character has its own list of items that Deposit All, Deposit Category and 
 
 ## Profession Integration
 
-The profession controls live in the profession window itself. With [RetailProfessions](https://github.com/buildthehomelab/wow-mod-retail-professions):
+The profession controls live in the profession window itself. With [RetailProfessions](https://github.com/EvilTactician/wow-mod-retail-professions):
 
 - **Create** and **Create All** count the reagent bank and take what your bags are missing out of it before crafting (**Use reagent bank**)
 - **Deposit leftovers** puts reagents that came out of the bank and weren't used back when you close the window
