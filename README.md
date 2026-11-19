@@ -1,10 +1,10 @@
-# Reagent Bank Account 2.13.1
+# Reagent Bank Account 2.13.2
 
 <div align="center">
 
 ![Interface Version](https://img.shields.io/badge/Interface-30300-blue)
 ![WoW Version](https://img.shields.io/badge/WoW-3.3.5a-orange)
-[![Version](https://img.shields.io/badge/Version-2.13.1-green)](https://github.com/EvilTactician/mod-reagent-bank-account)
+[![Version](https://img.shields.io/badge/Version-2.13.2-green)](https://github.com/EvilTactician/mod-reagent-bank-account)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 **A reagent bank system for AzerothCore with a required WotLK 3.3.5a UI addon.**
@@ -27,7 +27,7 @@ This module adds a server-backed reagent bank for trade goods, gems, and craftin
 - Deposit by category
 - Search the whole bank from the home screen (at least 3 characters); click a result to withdraw it
 - Personal deposit exclusions per character, with a **Deposit Exclusions** button to bank them on demand (see below)
-- Green **Back** buttons: from a category back to the home screen, and from an item back to the category or search results it was opened from
+- Blue **Back** buttons: from a category back to the home screen, and from an item back to the category or search results it was opened from
 - Escape closes the window, like the default UI's windows
 - Withdraw all, category, stack, single item, or exact amount
 - Optional deposit preview confirmation

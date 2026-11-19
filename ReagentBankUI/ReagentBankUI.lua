@@ -152,18 +152,18 @@ local CATEGORY_BUTTON_GAP = 8
 local CATEGORY_PAGE_TEXT_GAP = 10
 local CATEGORY_PAGE_TEXT_WIDTH = 104
 local DEPOSIT_EXCLUSIONS_BUTTON_WIDTH = 148
--- The Back button's art: DragonUI's red three-slice sheet (MIT, NeticSoul) with its
--- red and green channels swapped, so it stands out from the red buttons.
-local GREEN_BUTTON_TEXTURE = "Interface\\AddOns\\ReagentBankUI\\Textures\\GreenButton"
-local GREEN_BUTTON_CAP_WIDTH = 114
-local GREEN_BUTTON_ART_HEIGHT = 128
-local GREEN_BUTTON_STATES = {
+-- The Back button's art: DragonUI's red three-slice sheet (MIT, NeticSoul) recoloured
+-- blue, so it stands out from the red buttons.
+local BACK_BUTTON_TEXTURE = "Interface\\AddOns\\ReagentBankUI\\Textures\\BackButton"
+local BACK_BUTTON_CAP_WIDTH = 114
+local BACK_BUTTON_ART_HEIGHT = 128
+local BACK_BUTTON_STATES = {
     NORMAL = { cap = { 4/256, 61/256, 76/256, 140/256 }, mid = { 4/256, 36/256, 148/256, 212/256 } },
     PUSHED = { cap = { 136/256, 193/256, 76/256, 140/256 }, mid = { 84/256, 116/256, 148/256, 212/256 } },
 }
 local SEARCH_BOX_WIDTH = 210
 -- How far the search box sits below the mode text's line.
-local SEARCH_BOX_DROP = 3
+local SEARCH_BOX_DROP = 7
 local SEARCH_MIN_LENGTH = 3
 local SEARCH_DELAY = 0.45
 local EXCLUSION_ROW_COUNT = 8
@@ -3016,7 +3016,7 @@ function RB:RefreshCurrentView()
     end
 end
 
--- The green Back: an item goes back to the search results or the category it
+-- The blue Back: an item goes back to the search results or the category it
 -- was opened from; a category goes back to the home screen.
 function RB:GoBack()
     self:HideWithdrawPrompt()
@@ -5919,16 +5919,16 @@ function RB:CreateButton(parent, width, height, label, stock)
     return button
 end
 
--- Turns a red button green. With DragonUI the button keeps DragonUI's own red
+-- Gives a red button the Back button's blue art. With DragonUI the button keeps DragonUI's own red
 -- button skin, which only changes texture coordinates and shading for hover,
 -- press and disable, so swapping the sheet underneath is enough. Without it the
 -- stock art is hidden and the same three-slice is drawn here.
-function RB:SkinGreenButton(button)
+function RB:SkinBackButton(button)
     local skin = button._duiRedButton
     if skin and skin.left then
         for _, key in ipairs({ "left", "right", "middle", "hlLeft", "hlRight", "hlMiddle" }) do
             if skin[key] then
-                skin[key]:SetTexture(GREEN_BUTTON_TEXTURE)
+                skin[key]:SetTexture(BACK_BUTTON_TEXTURE)
             end
         end
         return
@@ -5944,21 +5944,21 @@ function RB:SkinGreenButton(button)
     end
 
     local left = button:CreateTexture(nil, "BACKGROUND")
-    left:SetTexture(GREEN_BUTTON_TEXTURE)
+    left:SetTexture(BACK_BUTTON_TEXTURE)
     left:SetPoint("TOPLEFT", 0, 0)
 
     local right = button:CreateTexture(nil, "BACKGROUND")
-    right:SetTexture(GREEN_BUTTON_TEXTURE)
+    right:SetTexture(BACK_BUTTON_TEXTURE)
     right:SetPoint("TOPRIGHT", 0, 0)
 
     local middle = button:CreateTexture(nil, "BACKGROUND")
-    middle:SetTexture(GREEN_BUTTON_TEXTURE)
+    middle:SetTexture(BACK_BUTTON_TEXTURE)
     middle:SetPoint("TOPLEFT", left, "TOPRIGHT", 0, 0)
     middle:SetPoint("BOTTOMRIGHT", right, "BOTTOMLEFT", 0, 0)
 
     local function apply(pushed)
         local height = button:GetHeight() or 0
-        local cap = GREEN_BUTTON_CAP_WIDTH * (height / GREEN_BUTTON_ART_HEIGHT)
+        local cap = BACK_BUTTON_CAP_WIDTH * (height / BACK_BUTTON_ART_HEIGHT)
         local width = button:GetWidth() or 0
         if width > 0 and cap * 2 > width * 0.8 then
             cap = width * 0.4
@@ -5968,7 +5968,7 @@ function RB:SkinGreenButton(button)
         right:SetWidth(cap)
         right:SetHeight(height)
 
-        local rect = pushed and GREEN_BUTTON_STATES.PUSHED or GREEN_BUTTON_STATES.NORMAL
+        local rect = pushed and BACK_BUTTON_STATES.PUSHED or BACK_BUTTON_STATES.NORMAL
         left:SetTexCoord(rect.cap[1], rect.cap[2], rect.cap[3], rect.cap[4])
         right:SetTexCoord(rect.cap[2], rect.cap[1], rect.cap[3], rect.cap[4])
         middle:SetTexCoord(rect.mid[1], rect.mid[2], rect.mid[3], rect.mid[4])
@@ -6241,11 +6241,11 @@ function RB:CreateFrame()
         RB:RequestRoot()
     end)
 
-    -- Green Back: in a category it replaces Categories (back to the home screen);
+    -- Blue Back: in a category it replaces Categories (back to the home screen);
     -- on an item it sits left of Categories and goes back to where the item was opened.
     f.navBack = self:CreateButton(f, CATEGORY_BACK_BUTTON_WIDTH, CATEGORY_BUTTON_HEIGHT, "Back")
     f.navBack:SetPoint("TOPLEFT", CATEGORY_BUTTON_ROW_X, CATEGORY_BUTTON_ROW_Y)
-    self:SkinGreenButton(f.navBack)
+    self:SkinBackButton(f.navBack)
     f.navBack:SetScript("OnClick", function()
         RB:GoBack()
     end)
@@ -6859,7 +6859,7 @@ function RB:SetCommonVisibility(view)
     f.shoppingList:Show()
 
     -- Categories keeps the row's first slot (Deposit Category hangs off it) except
-    -- on an item, where the green Back takes that slot and Categories follows it.
+    -- on an item, where the blue Back takes that slot and Categories follows it.
     f.back:ClearAllPoints()
     if detailView then
         f.back:SetPoint("LEFT", f.navBack, "RIGHT", CATEGORY_BUTTON_GAP, 0)
